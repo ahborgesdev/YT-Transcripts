@@ -34,8 +34,8 @@ citadas. Todo el texto y el índice viven en un único archivo SQLite en tu equi
    del índice.
 
 La guía completa para usuarios está en
-[Guia-de-uso-YT-Transcripts.docx](Guia-de-uso-YT-Transcripts.docx) (y en PDF junto
-al ejecutable).
+[docs/Guia-de-uso-YT-Transcripts.pdf](docs/Guia-de-uso-YT-Transcripts.pdf)
+(fuente editable: [DOCX](Guia-de-uso-YT-Transcripts.docx)).
 
 ## Cómo funciona el RAG
 
@@ -112,6 +112,7 @@ El ejecutable queda en `dist/BuscadorYT.exe`.
 | `BuscadorYT.spec` | receta de empaquetado con PyInstaller |
 | `make_guia.py` | genera la guía de uso (DOCX → PDF) |
 | `RAG.md` | documentación técnica del índice y de los proveedores de IA |
+| `docs/` | guía de uso en PDF |
 
 ## Licencias
 

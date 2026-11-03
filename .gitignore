@@ -9,6 +9,7 @@ dist/
 # Datos y salidas locales (no subir al repositorio)
 *.db
 *.pdf
+!docs/*.pdf
 Archivo*.zip
 _build.log
 
