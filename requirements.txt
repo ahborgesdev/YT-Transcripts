@@ -1,0 +1,8 @@
+youtube-transcript-api>=0.6.4
+reportlab>=4.0
+requests>=2.31
+PySide6>=6.12,<6.13   # Qt 6.12 es la última que soporta Windows 10 (1809+)
+
+# RAG (búsqueda semántica local + cliente LLM)
+fastembed>=0.9
+numpy>=1.26

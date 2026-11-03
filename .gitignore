@@ -1,0 +1,30 @@
+# Python
+__pycache__/
+*.pyc
+
+# PyInstaller
+build/
+dist/
+
+# Datos y salidas locales (no subir al repositorio)
+*.db
+*.pdf
+Archivo*.zip
+_build.log
+
+# macOS
+.DS_Store
+
+# Previsualizaciones temporales del entorno de documentos
+.dsh-office.*/
+
+# Entorno virtual y configuración local (la clave API nunca debe subirse)
+.venv/
+rag_config.json
+models/
+
+# Preferencias de interfaz (tamaño de letra del lector)
+ui_config.json
+
+# Caché local de PyInstaller (redirigida dentro del proyecto)
+.pyinstaller-cache/
