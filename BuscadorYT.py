@@ -19,6 +19,11 @@ from PySide6 import QtCore, QtGui, QtWidgets
 from PySide6.QtCore import Qt, QUrl
 from PySide6.QtGui import QFontDatabase, QKeySequence, QShortcut, QTextCursor
 
+from responsive import (
+    FieldRow, FlowWidget, MODE_COMPACT, MODE_MEDIUM, MODE_WIDE,
+    ResponsiveMixin, mode_for, space,
+)
+
 # --- Intento importar youtube_transcript_api ---
 try:
     from youtube_transcript_api import YouTubeTranscriptApi, TranscriptsDisabled, NoTranscriptFound
@@ -114,12 +119,15 @@ QScrollArea {
     background: transparent;
 }
 
-/* ── Botones ── */
+/* ── Botones ──
+   Una sola métrica para todos: misma altura, mismo radio y misma tipografía.
+   La jerarquía la marca el color (#primary / #danger / neutro), no el tamaño. */
 QPushButton {
     background-color: #262633;
     border: 1px solid #34343f;
     border-radius: 8px;
-    padding: 9px 14px;
+    padding: 8px 14px;
+    min-height: 20px;
     color: #e8e8f0;
     font-weight: 500;
 }
@@ -136,9 +144,9 @@ QPushButton:disabled {
     border-color: #26262f;
 }
 
-/* Botones compactos del tamaño de letra (lector) */
+/* Botones compactos del tamaño de letra (lector): misma altura, más estrechos */
 QPushButton#fontBtn {
-    padding: 2px 9px;
+    padding: 8px 10px;
     min-width: 14px;
     font-size: 13px;
     font-weight: 600;
@@ -146,6 +154,11 @@ QPushButton#fontBtn {
 }
 QPushButton#fontBtn:hover {
     color: #ffffff;
+    border-color: #6c5ce7;
+}
+QPushButton#fontBtn:checked {
+    color: #ffffff;
+    background-color: #6c5ce7;
     border-color: #6c5ce7;
 }
 
@@ -406,6 +419,64 @@ def save_ui_config(**kwargs) -> None:
         pass  # sin permiso de escritura: la app sigue funcionando igual
 
 
+# ── Bases de datos con nombre ──
+# La app trabaja sobre UNA base activa a la vez. Las bases viven junto a la
+# app (sea el script o el ejecutable empaquetado) para que la carpeta siga
+# siendo portable: costura.db, cocina.db, transcripts.db…
+DB_NAME_DEFAULT = "transcripts"
+
+
+def _sanitize_db_name(raw: str) -> str:
+    """Convierte lo que escribe el usuario en un nombre de archivo seguro."""
+    name = (raw or "").strip()
+    if name.lower().endswith(".db"):
+        name = name[:-3]
+    # Letras, números, guion, guion_bajo y punto; el resto pasa a «_».
+    name = re.sub(r"[^\w.-]+", "_", name, flags=re.UNICODE).strip("._- ")
+    name = name[:60].strip("._- ")
+    return name or DB_NAME_DEFAULT
+
+
+def db_stem(path: str | None = None) -> str:
+    """Nombre de la base activa sin extensión (títulos, nombre del cuaderno)."""
+    return os.path.splitext(os.path.basename(path or DB_PATH))[0]
+
+
+def db_path(name: str) -> str:
+    """Ruta de `<name>.db` dentro de la carpeta de la app."""
+    return os.path.join(APP_DIR, _sanitize_db_name(name) + ".db")
+
+
+def set_active_db(path: str) -> None:
+    """Cambia la base activa para toda la app (UI y rag.py)."""
+    global DB_PATH
+    DB_PATH = os.path.abspath(path)
+    # rag.py puede importarse más tarde (import perezoso): le pasamos la base
+    # activa por entorno para que lo haga ya apuntando a la correcta.
+    os.environ["TRANSCRIP_DB_FILE"] = DB_PATH
+    rag = sys.modules.get("rag")
+    if rag is not None:  # si rag ya está importado, que use la nueva base
+        rag.DB_PATH = DB_PATH
+
+
+def db_initial_path() -> str:
+    """Base activa según ui_config.json (transcripts.db si aún no hay ninguna)."""
+    saved = os.path.basename(str(load_ui_config().get("db_name") or "").strip())
+    if not saved:
+        return db_path(DB_NAME_DEFAULT)
+    if not saved.lower().endswith(".db"):
+        saved += ".db"
+    return os.path.join(APP_DIR, saved)
+
+
+def _bases_disponibles() -> list[str]:
+    """Nombres de las bases (*.db) que hay en la carpeta de la app."""
+    try:
+        return sorted(f for f in os.listdir(APP_DIR) if f.lower().endswith(".db"))
+    except OSError:
+        return []
+
+
 # ─────────────────────────────────────────────
 # REDACCIÓN CON IA (LLM) — parámetro del proyecto
 # ─────────────────────────────────────────────
@@ -508,6 +579,18 @@ def init_db():
     cols = [r[1] for r in c.execute("PRAGMA table_info(transcripts)")]
     if "owner" not in cols:
         c.execute("ALTER TABLE transcripts ADD COLUMN owner TEXT")
+    # Preguntas y respuestas guardadas para el «cuaderno» en PDF de cada base.
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS qa_log (
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            question    TEXT    NOT NULL,
+            answer      TEXT    NOT NULL,
+            sources     TEXT,
+            provider    TEXT,
+            model       TEXT,
+            created_at  TEXT    NOT NULL
+        )
+    """)
     conn.commit()
     conn.close()
 
@@ -552,6 +635,40 @@ def delete_transcript(video_id):
     c.execute("DELETE FROM transcripts WHERE video_id = ?", (video_id,))
     conn.commit()
     conn.close()
+
+# ── Cuaderno de preguntas y respuestas (PDF) ──
+def save_qa(question, answer, sources=None, provider="", model=""):
+    """Añade una pregunta-respuesta al historial de la base activa."""
+    conn = sqlite3.connect(DB_PATH)
+    try:
+        conn.execute(
+            "INSERT INTO qa_log (question, answer, sources, provider, model, created_at) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            (question, answer, json.dumps(sources or [], ensure_ascii=False),
+             provider, model, datetime.now().isoformat(timespec="seconds")),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+def get_qa_entries():
+    """Historial de preguntas de la base activa, en orden de creación."""
+    conn = sqlite3.connect(DB_PATH)
+    try:
+        rows = conn.execute(
+            "SELECT id, question, answer, sources, provider, model, created_at "
+            "FROM qa_log ORDER BY id"
+        ).fetchall()
+    finally:
+        conn.close()
+    return [
+        {
+            "id": r[0], "question": r[1], "answer": r[2],
+            "sources": json.loads(r[3]) if r[3] else [],
+            "provider": r[4], "model": r[5], "created_at": r[6],
+        }
+        for r in rows
+    ]
 
 def transcript_exists(video_id):
     """Devuelve True si ya tenemos esta transcripción guardada en la BD."""
@@ -703,17 +820,16 @@ def _split_paragraphs(text: str, sentences_per_para: int = 4, max_chars: int = 7
 # ─────────────────────────────────────────────
 # EXPORTACIÓN A PDF
 # ─────────────────────────────────────────────
-def _escribir_pdf(filepath, title, content, url, owner=""):
-    """Genera el PDF de una transcripción con «Página N de M» al pie de cada página."""
-    import html as html_module
+def _pdf_canvas_numerado():
+    """Canvas de reportlab que escribe «Página N de M» al pie de cada página.
 
+    Se construye de forma perezosa (la clase necesita el módulo ya importado)
+    y lo comparten el PDF de una transcripción y el cuaderno de preguntas.
+    """
     from reportlab.lib import colors
-    from reportlab.lib.enums import TA_LEFT
     from reportlab.lib.pagesizes import A4
-    from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
     from reportlab.lib.units import mm
     from reportlab.pdfgen import canvas as pdf_canvas
-    from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer
 
     class _NumberedCanvas(pdf_canvas.Canvas):
         """Canvas que aplaza el cierre de página para poder escribir el total."""
@@ -744,6 +860,20 @@ def _escribir_pdf(filepath, title, content, url, owner=""):
             self.setFillColor(colors.HexColor('#777777'))
             self.drawCentredString(A4[0] / 2.0, y, f'Página {self._pageNumber} de {total}')
             self.restoreState()
+
+    return _NumberedCanvas
+
+
+def _escribir_pdf(filepath, title, content, url, owner=""):
+    """Genera el PDF de una transcripción con «Página N de M» al pie de cada página."""
+    import html as html_module
+
+    from reportlab.lib import colors
+    from reportlab.lib.enums import TA_LEFT
+    from reportlab.lib.pagesizes import A4
+    from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+    from reportlab.lib.units import mm
+    from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer
 
     doc = SimpleDocTemplate(
         filepath, pagesize=A4,
@@ -783,7 +913,116 @@ def _escribir_pdf(filepath, title, content, url, owner=""):
         if line:
             story.append(Paragraph(html_module.escape(line), body_style))
 
-    doc.build(story, canvasmaker=_NumberedCanvas)
+    doc.build(story, canvasmaker=_pdf_canvas_numerado())
+
+
+def _escribir_cuaderno_pdf(filepath, db_title, entries):
+    """Regenera el cuaderno completo de preguntas y respuestas de una base.
+
+    Se reconstruye desde `qa_log` en cada guardado, así el PDF siempre refleja
+    todas las preguntas (y no depende de ir parcheando páginas).
+    """
+    import html as html_module
+
+    from reportlab.lib import colors
+    from reportlab.lib.enums import TA_LEFT
+    from reportlab.lib.pagesizes import A4
+    from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+    from reportlab.lib.units import mm
+    from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer
+
+    doc = SimpleDocTemplate(
+        filepath, pagesize=A4,
+        leftMargin=20 * mm, rightMargin=20 * mm,
+        topMargin=20 * mm, bottomMargin=20 * mm,
+        title=f"Cuaderno de preguntas · {db_title}",
+    )
+
+    styles = getSampleStyleSheet()
+    title_style = ParagraphStyle(
+        'CuadernoTitle', parent=styles['Title'],
+        fontName='Helvetica-Bold', fontSize=20, leading=24, spaceAfter=6,
+    )
+    meta_style = ParagraphStyle(
+        'CuadernoMeta', parent=styles['Normal'], alignment=TA_LEFT,
+        fontName='Helvetica', fontSize=9.5, leading=13,
+        textColor=colors.HexColor('#666666'), spaceAfter=16,
+    )
+    question_style = ParagraphStyle(
+        'CuadernoQuestion', parent=styles['Normal'],
+        fontName='Helvetica-Bold', fontSize=12.5, leading=16,
+        textColor=colors.HexColor('#3b2f7a'),
+        spaceBefore=14, spaceAfter=3,
+    )
+    date_style = ParagraphStyle(
+        'CuadernoDate', parent=styles['Normal'],
+        fontName='Helvetica-Oblique', fontSize=8.5, leading=11,
+        textColor=colors.HexColor('#888888'), spaceAfter=7,
+    )
+    body_style = ParagraphStyle(
+        'CuadernoBody', parent=styles['Normal'], alignment=TA_LEFT,
+        fontName='Helvetica', fontSize=10, leading=14, spaceAfter=6,
+    )
+    sources_label = ParagraphStyle(
+        'CuadernoSourcesLabel', parent=styles['Normal'],
+        fontName='Helvetica-Bold', fontSize=8.5, leading=11,
+        textColor=colors.HexColor('#555555'), spaceBefore=8, spaceAfter=3,
+    )
+    source_style = ParagraphStyle(
+        'CuadernoSources', parent=styles['Normal'], alignment=TA_LEFT,
+        fontName='Helvetica', fontSize=8.5, leading=11.5,
+        textColor=colors.HexColor('#1155CC'), leftIndent=12, spaceAfter=2,
+    )
+    pasaje_style = ParagraphStyle(
+        'CuadernoPasaje', parent=styles['Normal'], alignment=TA_LEFT,
+        fontName='Helvetica-Oblique', fontSize=9, leading=12.5,
+        textColor=colors.HexColor('#333333'), leftIndent=12, rightIndent=8,
+        spaceBefore=1, spaceAfter=9,
+    )
+
+    fecha = datetime.now().strftime("%d/%m/%Y %H:%M")
+    story = [
+        Paragraph("Cuaderno de preguntas", title_style),
+        Paragraph(
+            f"Base de datos: <b>{html_module.escape(db_title)}</b> · "
+            f"{len(entries)} pregunta(s) · actualizado el {fecha}", meta_style),
+    ]
+
+    for i, entry in enumerate(entries, 1):
+        story.append(Paragraph(
+            f"{i}. {html_module.escape(entry['question'])}", question_style))
+        creado = (entry.get("created_at") or "").replace("T", " ")
+        extras = [creado] if creado else []
+        provider = entry.get("provider") or ""
+        model = entry.get("model") or ""
+        if provider or model:
+            extras.append(" ".join(x for x in (provider, model) if x))
+        if extras:
+            story.append(Paragraph(
+                html_module.escape(" · ".join(extras)), date_style))
+
+        for parrafo in (entry.get("answer") or "").splitlines():
+            parrafo = parrafo.strip()
+            if parrafo:
+                story.append(Paragraph(html_module.escape(parrafo), body_style))
+
+        pasajes = entry.get("sources") or []
+        if pasajes:
+            story.append(Paragraph("Pasajes recuperados", sources_label))
+            for j, fuente in enumerate(pasajes, 1):
+                titulo = str(fuente.get("title") or fuente.get("video_id") or "")
+                url = (fuente.get("url")
+                       or f"https://www.youtube.com/watch?v={fuente.get('video_id', '')}")
+                story.append(Paragraph(
+                    f'[{j}] <link href="{html_module.escape(url, quote=True)}">'
+                    f'{html_module.escape(titulo)}</link>', source_style))
+                # El texto exacto del pasaje, igual que al pulsarlo en la app.
+                texto_pasaje = (fuente.get("text") or "").strip()
+                if texto_pasaje:
+                    story.append(Paragraph(
+                        f"«{html_module.escape(texto_pasaje)}»", pasaje_style))
+
+    doc.build(story, canvasmaker=_pdf_canvas_numerado())
 
 
 # ─────────────────────────────────────────────
@@ -955,7 +1194,17 @@ class LlmTestWorker(QtCore.QObject):
 # GUI
 # ─────────────────────────────────────────────
 
-class MainWindow(QtWidgets.QMainWindow):
+class DbCombo(QtWidgets.QComboBox):
+    """Selector de base de datos que refresca la lista justo antes de abrirse."""
+
+    aboutToShow = QtCore.Signal()
+
+    def showPopup(self):  # noqa: N802 — API de Qt
+        self.aboutToShow.emit()
+        super().showPopup()
+
+
+class MainWindow(ResponsiveMixin, QtWidgets.QMainWindow):
     def __init__(self):
         super().__init__()
 
@@ -969,19 +1218,248 @@ class MainWindow(QtWidgets.QMainWindow):
 
         # Preferencias de UI (tamaño de letra del lector)
         self._ui_cfg = load_ui_config()
+        self._zoom_accum = 0.0   # acumulador del zoom por pellizco (trackpad)
 
-        self.setWindowTitle("YT Transcripts")
+        self.setWindowTitle(f"YT Transcripts · {db_stem()}")
         self.resize(1200, 800)
-        self.setMinimumSize(1100, 720)
+        # Mobile-first: la ventana tiene que caber en un móvil (Moto ≈ 432 dp).
+        self.setMinimumSize(380, 680)
+
+        # Filas y hileras que se recolocan al cambiar de breakpoint.
+        self._field_rows = []
+        self._flow_rows = []
 
         self._build_ui()
+        self._build_menu()
+        self._refresh_db_combo()
 
-        init_db()
-        self._refresh_list()
+        self._layout_mode = mode_for(self.width())
+        self._apply_breakpoint(self._layout_mode)
+
+        # F11 entra/sale del modo lectura; Esc también sale.
+        atajo = QShortcut(QKeySequence("F11"), self)
+        atajo.setContext(Qt.WindowShortcut)
+        atajo.activated.connect(self.btn_read.toggle)
+        atajo = QShortcut(QKeySequence(Qt.Key_Escape), self)
+        atajo.setContext(Qt.WindowShortcut)
+        atajo.activated.connect(self._exit_reading)
+
+        try:
+            init_db()
+            self._refresh_list()
+        except Exception as exc:  # noqa: BLE001 — p. ej. base bloqueada por otro programa
+            self._log(f"❌ No se pudo preparar la base {os.path.basename(DB_PATH)}: {exc}", "err")
+            QtWidgets.QMessageBox.critical(
+                self, "No se pudo abrir la base",
+                f"No se pudo preparar la base de datos:\n{DB_PATH}\n\n{exc}")
+        self._update_qa_widgets()
+        self._log(f"🗂  Base de datos activa: {os.path.basename(DB_PATH)}")
 
         if not YT_API_AVAILABLE:
             self._log("⚠️  Módulo 'youtube-transcript-api' no encontrado.\n"
                       "   Instálalo con:  pip install youtube-transcript-api\n", "warn")
+
+    # ── Responsividad (mobile-first) ──────────
+    def _apply_breakpoint(self, mode):
+        """Recoloca la ventana según el ancho: compact / medium / wide.
+
+        En compact: márgenes y espaciados pequeños, cabecera apilada, splitter
+        en vertical y formularios con la etiqueta encima del campo. En wide se
+        vuelve a la disposición de escritorio.
+        """
+        if getattr(self, "_reading", False):
+            return   # en modo lectura manda el texto: no se recoloca nada
+        compact = mode == MODE_COMPACT
+
+        root = getattr(self, "_root_layout", None)
+        if root is not None:
+            margen = space(1.5) if compact else space(2.5)
+            root.setContentsMargins(margen, margen, margen, space(1.5))
+            root.setSpacing(space(1) if compact else space(1.75))
+
+        header = getattr(self, "_header_layout", None)
+        if header is not None:
+            # La cabecera solo va en una línea en escritorio.
+            apilada = mode != MODE_WIDE
+            header.setDirection(
+                QtWidgets.QBoxLayout.TopToBottom if apilada
+                else QtWidgets.QBoxLayout.LeftToRight)
+            header.setStretch(1, 0 if apilada else 1)
+
+        splitter = getattr(self, "_splitter", None)
+        if splitter is not None:
+            if compact:
+                splitter.setOrientation(Qt.Vertical)
+                # Reparto proporcional: lista arriba, pestañas abajo.
+                splitter.setStretchFactor(0, 2)
+                splitter.setStretchFactor(1, 3)
+            else:
+                splitter.setOrientation(Qt.Horizontal)
+                splitter.setStretchFactor(0, 0)
+                splitter.setStretchFactor(1, 1)
+                splitter.setSizes([300, 900] if mode == MODE_MEDIUM else [380, 800])
+
+        for fila in getattr(self, "_field_rows", []):
+            fila.set_mode(mode)
+        for flujo in getattr(self, "_flow_rows", []):
+            flujo.setSpacing(space(0.75) if compact else space(1))
+
+        # En el móvil el registro se queda en tres líneas para dejar aire.
+        log = getattr(self, "log_area", None)
+        if log is not None:
+            log.setFixedHeight(space(7) if compact else space(9.75))
+
+        # Filas de «información + acción»: apiladas en compact.
+        for nombre in ("_info_row", "_rag_status_row", "_rag_ask_row"):
+            fila = getattr(self, nombre, None)
+            if fila is None:
+                continue
+            fila.setDirection(
+                QtWidgets.QBoxLayout.TopToBottom if compact
+                else QtWidgets.QBoxLayout.LeftToRight)
+            fila.setStretch(0, 0 if compact else 1)
+
+    # ── Base de datos: menú y cambio en caliente ──
+    def _build_menu(self):
+        menu = self.menuBar().addMenu("Base de datos")
+        act_nueva = menu.addAction("Nueva base de datos…")
+        act_nueva.triggered.connect(self._new_db_dialog)
+        act_abrir = menu.addAction("Abrir base de datos…")
+        act_abrir.triggered.connect(self._open_db_dialog)
+        self._db_submenu = menu.addMenu("Bases disponibles")
+        self._db_submenu.aboutToShow.connect(self._populate_db_menu)
+        menu.addSeparator()
+        act_carpeta = menu.addAction("Mostrar carpeta de la app")
+        act_carpeta.triggered.connect(self._open_data_dir)
+
+    def _populate_db_menu(self):
+        """Rellena «Bases disponibles» con las *.db de la carpeta de la app."""
+        self._db_submenu.clear()
+        activa = os.path.basename(DB_PATH)
+        bases = _bases_disponibles()
+        if not bases:
+            vacio = self._db_submenu.addAction("(no hay bases en la carpeta)")
+            vacio.setEnabled(False)
+            return
+        for nombre in bases:
+            act = self._db_submenu.addAction(nombre)
+            act.setCheckable(True)
+            act.setChecked(nombre == activa)
+            act.triggered.connect(
+                lambda _checked=False, r=os.path.join(APP_DIR, nombre): self._switch_db(r))
+
+    def _refresh_db_combo(self):
+        """Refresca el selector visible con todas las *.db de la carpeta."""
+        activa = os.path.basename(DB_PATH)
+        bases = _bases_disponibles()
+        if activa not in bases:
+            bases = [activa] + bases
+        self.cmb_db.blockSignals(True)
+        self.cmb_db.clear()
+        for nombre in bases:
+            self.cmb_db.addItem(nombre, os.path.join(APP_DIR, nombre))
+        indice = self.cmb_db.findText(activa)
+        if indice >= 0:
+            self.cmb_db.setCurrentIndex(indice)
+        self.cmb_db.blockSignals(False)
+
+    def _on_db_combo(self, indice):
+        ruta = self.cmb_db.itemData(indice)
+        if ruta and os.path.abspath(ruta) != os.path.abspath(DB_PATH):
+            self._switch_db(ruta)
+
+    def _new_db_dialog(self):
+        nombre, ok = QtWidgets.QInputDialog.getText(
+            self, "Nueva base de datos",
+            "Nombre de la base de datos (se creará «nombre.db»):", text="")
+        if not ok:
+            return
+        nombre = _sanitize_db_name(nombre)
+        ruta = os.path.join(APP_DIR, nombre + ".db")
+        if os.path.exists(ruta) and QtWidgets.QMessageBox.question(
+                self, "Ya existe",
+                f"«{nombre}.db» ya existe.\n\n¿Quieres abrirla?",
+                QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No,
+                QtWidgets.QMessageBox.Yes) != QtWidgets.QMessageBox.Yes:
+            return
+        self._switch_db(ruta)
+
+    def _open_db_dialog(self):
+        ruta, _ = QtWidgets.QFileDialog.getOpenFileName(
+            self, "Abrir base de datos", APP_DIR, "Bases SQLite (*.db)")
+        if not ruta:
+            return
+        if os.path.dirname(os.path.abspath(ruta)) != os.path.abspath(APP_DIR):
+            QtWidgets.QMessageBox.warning(
+                self, "Base fuera de la carpeta",
+                "De momento las bases de datos deben estar en la carpeta de la app:\n\n"
+                f"{APP_DIR}\n\nCopia el archivo ahí y vuelve a abrirlo.")
+            return
+        self._switch_db(ruta)
+
+    def _switch_db(self, ruta):
+        """Cambia la base activa sin reiniciar la app."""
+        ruta = os.path.abspath(ruta)
+        if ruta == os.path.abspath(DB_PATH):
+            return
+        ocupado = any(
+            hilo is not None and hilo.is_alive()
+            for hilo in (getattr(self, "_worker_thread", None),
+                         getattr(self, "_rag_ask_thread", None),
+                         getattr(self, "_rag_index_thread", None)))
+        if ocupado:
+            QtWidgets.QMessageBox.information(
+                self, "Espera un momento",
+                "Hay una descarga o una consulta en curso.\n"
+                "Termínala antes de cambiar de base de datos.")
+            self._refresh_db_combo()
+            return
+
+        anterior = DB_PATH
+        try:
+            set_active_db(ruta)
+            init_db()
+        except Exception as exc:  # noqa: BLE001 — base bloqueada, corrupta, sin permisos…
+            set_active_db(anterior)
+            detalle = str(exc)
+            pista = ""
+            if "locked" in detalle.lower() or "busy" in detalle.lower():
+                pista = ("\n\nParece que otro programa la tiene abierta "
+                         "(DB Browser, otra copia de la app…).\n"
+                         "Ciérrala y vuelve a intentarlo.")
+            self._log(
+                f"❌ No se pudo abrir {os.path.basename(ruta)}: {detalle}", "err")
+            self._refresh_db_combo()  # el selector vuelve a la base que sigue activa
+            QtWidgets.QMessageBox.critical(
+                self, "No se pudo abrir la base",
+                f"No se pudo abrir:\n{ruta}\n\n{detalle}{pista}")
+            return
+
+        save_ui_config(db_name=os.path.basename(ruta))
+        self.setWindowTitle(f"YT Transcripts · {db_stem()}")
+        self._refresh_db_combo()
+
+        # Limpiar todo lo que pertenecía a la base anterior.
+        self.listbox.blockSignals(True)
+        self.listbox.clear()
+        self.listbox.blockSignals(False)
+        self.lbl_title.setText("Selecciona o descarga una transcripción")
+        self.lbl_meta.setText("")
+        self.lbl_meta.setVisible(False)
+        self.texto.clear()
+        self.rag_hits.clear()
+        self.rag_answer.clear()
+        self._rag_hits = []
+        self._last_qa = None
+        self.btn_qa_save.setEnabled(False)
+        self._update_qa_widgets()
+
+        try:
+            self._refresh_list()
+        except Exception as exc:  # noqa: BLE001
+            self._log(f"⚠️  No se pudo leer la lista de la nueva base: {exc}", "warn")
+        self._rag_refresh_status()
+        self._log(f"🗂  Base de datos activa: {os.path.basename(ruta)}")
 
     # ── Layout principal ──────────────────────
     def _build_ui(self):
@@ -990,9 +1468,11 @@ class MainWindow(QtWidgets.QMainWindow):
         root = QtWidgets.QVBoxLayout(central)
         root.setContentsMargins(20, 18, 20, 16)
         root.setSpacing(14)
+        self._root_layout = root
 
         # ── Cabecera ──
-        header = QtWidgets.QHBoxLayout()
+        header = QtWidgets.QBoxLayout(QtWidgets.QBoxLayout.LeftToRight)
+        self._header_layout = header
         title_box = QtWidgets.QVBoxLayout()
         title_box.setSpacing(1)
         app_title = QtWidgets.QLabel("▶  YT Transcripts")
@@ -1003,29 +1483,63 @@ class MainWindow(QtWidgets.QMainWindow):
         title_box.addWidget(subtitle)
         header.addLayout(title_box)
         header.addStretch(1)
-        db_label = QtWidgets.QLabel(f"SQLite · {os.path.basename(DB_PATH)}")
-        db_label.setObjectName("appSubtitle")
-        header.addWidget(db_label)
-        root.addLayout(header)
+
+        # Selector visible de base de datos (temas: costura, ciencia, general…)
+        db_row = QtWidgets.QHBoxLayout()
+        db_row.setSpacing(6)
+        db_tag = QtWidgets.QLabel("Base de datos:")
+        db_tag.setObjectName("appSubtitle")
+        db_row.addWidget(db_tag)
+
+        self.cmb_db = DbCombo()
+        self.cmb_db.setMinimumWidth(180)
+        self.cmb_db.setSizeAdjustPolicy(QtWidgets.QComboBox.AdjustToContents)
+        self.cmb_db.setToolTip("Cambia de base de datos (tema) sin cerrar la app")
+        self.cmb_db.aboutToShow.connect(self._refresh_db_combo)
+        self.cmb_db.activated.connect(self._on_db_combo)
+        db_row.addWidget(self.cmb_db)
+
+        self.btn_db_new = QtWidgets.QPushButton("＋")
+        self.btn_db_new.setFixedWidth(34)
+        self.btn_db_new.setCursor(Qt.PointingHandCursor)
+        self.btn_db_new.setToolTip("Nueva base de datos…")
+        self.btn_db_new.clicked.connect(self._new_db_dialog)
+        db_row.addWidget(self.btn_db_new)
+
+        self.btn_db_open = QtWidgets.QPushButton("Abrir…")
+        self.btn_db_open.setCursor(Qt.PointingHandCursor)
+        self.btn_db_open.setToolTip("Abrir una base de datos existente de la carpeta de la app")
+        self.btn_db_open.clicked.connect(self._open_db_dialog)
+        db_row.addWidget(self.btn_db_open)
+
+        header.addLayout(db_row)
+        self._header_widget = QtWidgets.QWidget()
+        self._header_widget.setLayout(header)
+        root.addWidget(self._header_widget)
 
         divider = QtWidgets.QFrame()
         divider.setObjectName("divider")
         divider.setFrameShape(QtWidgets.QFrame.HLine)
+        self._divider = divider
         root.addWidget(divider)
 
         # ── Splitter: izquierda / derecha ──
         splitter = QtWidgets.QSplitter(Qt.Horizontal)
+        self._splitter = splitter
         splitter.setHandleWidth(8)
         splitter.setChildrenCollapsible(False)
         root.addWidget(splitter, 1)
 
-        splitter.addWidget(self._build_left_panel())
+        self._left_panel = self._build_left_panel()
+        splitter.addWidget(self._left_panel)
         splitter.addWidget(self._build_right_panel())
         splitter.setSizes([380, 800])
 
         # ── Registro (siempre visible, debajo del splitter) ──
         log_label = QtWidgets.QLabel("REGISTRO")
         log_label.setObjectName("sectionLabel")
+        log_label.setWordWrap(True)
+        self._log_label = log_label
         root.addWidget(log_label)
         self._build_log_area(root)
 
@@ -1068,7 +1582,6 @@ class MainWindow(QtWidgets.QMainWindow):
         self.btn_download = QtWidgets.QPushButton("⬇  Descargar transcripción")
         self.btn_download.setObjectName("primary")
         self.btn_download.setCursor(Qt.PointingHandCursor)
-        self.btn_download.setMinimumHeight(40)
         self.btn_download.clicked.connect(self._start_download)
         layout.addWidget(self.btn_download)
 
@@ -1089,7 +1602,13 @@ class MainWindow(QtWidgets.QMainWindow):
         layout.addWidget(list_label)
 
         self.listbox = QtWidgets.QListWidget()
+        # Los títulos son texto principal: se leen enteros (wrap), sin «…».
+        self.listbox.setWordWrap(True)
+        self.listbox.setTextElideMode(Qt.ElideNone)
+        self.listbox.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.listbox.setResizeMode(QtWidgets.QListView.Adjust)
         self.listbox.currentRowChanged.connect(self._on_select)
+        self.listbox.itemDoubleClicked.connect(self._enter_reading_on_double)
         layout.addWidget(self.listbox, 1)
 
         # Botones de acción
@@ -1135,16 +1654,18 @@ class MainWindow(QtWidgets.QMainWindow):
         layout.setContentsMargins(0, 8, 0, 0)
         layout.setSpacing(8)
 
-        # Meta info + control del tamaño de letra
-        info_row = QtWidgets.QHBoxLayout()
-        info_row.setSpacing(6)
+        # Meta info + control del tamaño de letra (se apila en compact)
+        self._info_row = QtWidgets.QBoxLayout(QtWidgets.QBoxLayout.LeftToRight)
+        self._info_row.setSpacing(6)
 
         info_box = QtWidgets.QVBoxLayout()
         info_box.setSpacing(1)
         self.lbl_title = QtWidgets.QLabel("Selecciona o descarga una transcripción")
         self.lbl_title.setObjectName("appTitle")
+        self.lbl_title.setWordWrap(True)
         self.lbl_meta = QtWidgets.QLabel("")
         self.lbl_meta.setObjectName("appSubtitle")
+        self.lbl_meta.setWordWrap(True)
         # La línea de datos lleva el enlace al vídeo: clic = navegador del sistema
         self.lbl_meta.setTextFormat(Qt.RichText)
         self.lbl_meta.setOpenExternalLinks(True)
@@ -1152,38 +1673,74 @@ class MainWindow(QtWidgets.QMainWindow):
             Qt.TextBrowserInteraction  # enlaces con clic + texto seleccionable
         )
         self.lbl_meta.setToolTip("Clic en el enlace para ver el vídeo en el navegador")
+        self.lbl_meta.setVisible(False)
         info_box.addWidget(self.lbl_title)
         info_box.addWidget(self.lbl_meta)
-        info_row.addLayout(info_box, 1)
+        self._info_row.addLayout(info_box, 1)
+
+        controles = QtWidgets.QWidget()
+        controles_box = QtWidgets.QHBoxLayout(controles)
+        controles_box.setContentsMargins(0, 0, 0, 0)
+        controles_box.setSpacing(6)
 
         self.lbl_font_size = QtWidgets.QLabel("")
         self.lbl_font_size.setObjectName("appSubtitle")
         self.lbl_font_size.setMinimumWidth(42)
         self.lbl_font_size.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
-        info_row.addWidget(self.lbl_font_size, 0, Qt.AlignBottom)
+        controles_box.addWidget(self.lbl_font_size, 0, Qt.AlignBottom)
 
         self.btn_font_dec = QtWidgets.QPushButton("A−")
         self.btn_font_dec.setObjectName("fontBtn")
         self.btn_font_dec.setCursor(Qt.PointingHandCursor)
         self.btn_font_dec.setToolTip("Letra más pequeña (Ctrl + −)")
         self.btn_font_dec.clicked.connect(lambda: self._nudge_read_font(-1))
-        info_row.addWidget(self.btn_font_dec, 0, Qt.AlignBottom)
+        controles_box.addWidget(self.btn_font_dec, 0, Qt.AlignBottom)
 
         self.btn_font_inc = QtWidgets.QPushButton("A+")
         self.btn_font_inc.setObjectName("fontBtn")
         self.btn_font_inc.setCursor(Qt.PointingHandCursor)
         self.btn_font_inc.setToolTip("Letra más grande (Ctrl + +)")
         self.btn_font_inc.clicked.connect(lambda: self._nudge_read_font(1))
-        info_row.addWidget(self.btn_font_inc, 0, Qt.AlignBottom)
+        controles_box.addWidget(self.btn_font_inc, 0, Qt.AlignBottom)
 
-        layout.addLayout(info_row)
+        self.btn_read = QtWidgets.QPushButton("⛶")
+        self.btn_read.setObjectName("fontBtn")
+        self.btn_read.setCursor(Qt.PointingHandCursor)
+        self.btn_read.setCheckable(True)
+        self.btn_read.setToolTip("Modo lectura: solo el texto a pantalla completa (F11)")
+        self.btn_read.toggled.connect(self._toggle_reading)
+        controles_box.addWidget(self.btn_read, 0, Qt.AlignBottom)
+
+        # Columna de lectura: ancho cómodo en vez de líneas kilométricas.
+        self.btn_column = QtWidgets.QPushButton("▭")
+        self.btn_column.setObjectName("fontBtn")
+        self.btn_column.setCursor(Qt.PointingHandCursor)
+        self.btn_column.setCheckable(True)
+        self.btn_column.setChecked(True)
+        self.btn_column.setVisible(False)
+        self.btn_column.setToolTip(
+            "Columna de lectura: limita el ancho de las líneas (solo en modo lectura)")
+        self.btn_column.toggled.connect(lambda _v: self._apply_reading_column())
+        controles_box.addWidget(self.btn_column, 0, Qt.AlignBottom)
+        controles_box.addStretch(1)
+        self._info_row.addWidget(controles, 0, Qt.AlignBottom)
+
+        layout.addLayout(self._info_row)
 
         # Visor de transcripción
         self.texto = QtWidgets.QTextEdit()
         self.texto.setObjectName("transcriptView")   # tamaño de letra: ver read_font_qss()
         self.texto.setReadOnly(True)
+        # El texto ocupa todo el ancho disponible y envuelve por la ventana.
+        self.texto.setLineWrapMode(QtWidgets.QTextEdit.LineWrapMode.WidgetWidth)
         self.texto.setPlaceholderText("Aquí se mostrará el texto de la transcripción…")
-        layout.addWidget(self.texto, 1)
+        # Marco centrado: en modo lectura se limita el ancho del visor (columna).
+        marco = QtWidgets.QHBoxLayout()
+        marco.setContentsMargins(0, 0, 0, 0)
+        marco.addStretch(1)
+        marco.addWidget(self.texto, 100)
+        marco.addStretch(1)
+        layout.addLayout(marco, 1)
 
         # Ctrl + rueda también cambia la letra, pasando por las mismas funciones
         # (si dejáramos el zoom interno de QTextEdit, el tamaño guardado y el
@@ -1201,6 +1758,51 @@ class MainWindow(QtWidgets.QMainWindow):
         sc.activated.connect(self._reset_read_font)
 
         return panel
+
+    # ── Modo lectura (solo el texto, a pantalla completa) ──
+    def _toggle_reading(self, activo: bool):
+        """Oculta todo lo que no sea el texto; el lector ocupa la ventana."""
+        self._reading = bool(activo)
+        for widget in (self._header_widget, self._divider, self._left_panel,
+                       self._log_label, self.log_area):
+            widget.setVisible(not self._reading)
+        self.tabs.tabBar().setVisible(not self._reading)
+        # Un splitter con un hijo oculto sigue contando su ancho mínimo:
+        # se colapsa el panel izquierdo a 0 para que el texto use toda la ventana.
+        self._left_panel.setMaximumWidth(0 if self._reading else 16777215)
+        if self._reading:
+            # El splitter, aun con el panel oculto, impone su ancho mínimo:
+            # en modo lectura las pestañas salen a la raíz y el splitter se esconde.
+            self._splitter.hide()
+            self._root_layout.addWidget(self.tabs, 1)
+            self.tabs.show()
+            self.tabs.setCurrentIndex(0)
+            self._root_layout.setContentsMargins(0, 0, 0, 0)
+            self._root_layout.setSpacing(0)
+        else:
+            self._splitter.addWidget(self.tabs)
+            self._splitter.show()
+            self._apply_breakpoint(getattr(self, "_layout_mode", MODE_WIDE))
+        if hasattr(self, "btn_column"):
+            self.btn_column.setVisible(self._reading)
+        self._apply_reading_column()
+
+    def _apply_reading_column(self):
+        """Columna de lectura: limita el ancho del visor y lo centra."""
+        if not hasattr(self, "btn_column"):
+            return
+        en_columna = (getattr(self, "_reading", False)
+                      and self.btn_column.isChecked())
+        self.texto.setMaximumWidth(space(90) if en_columna else 16777215)
+
+    def _exit_reading(self):
+        if getattr(self, "_reading", False):
+            self.btn_read.setChecked(False)
+
+    def _enter_reading_on_double(self, _item=None):
+        """Doble clic en una transcripción = abrirla en modo lectura."""
+        if not self.btn_read.isChecked():
+            self.btn_read.setChecked(True)
 
     # ── Tamaño de letra del lector ────────────
     def _apply_read_font_size(self, size: int):
@@ -1232,11 +1834,21 @@ class MainWindow(QtWidgets.QMainWindow):
         save_ui_config(read_font_size=READ_FONT_DEFAULT)
 
     def eventFilter(self, obj, event):
-        # Ctrl + rueda sobre el lector = zoom de la letra
-        if obj is self.texto.viewport() and event.type() == QtCore.QEvent.Wheel:
-            if event.modifiers() & Qt.ControlModifier:
-                self._nudge_read_font(1 if event.angleDelta().y() > 0 else -1)
-                return True
+        # Sobre el lector: Ctrl + rueda y pellizco del trackpad = zoom de letra
+        if obj is self.texto.viewport():
+            if event.type() == QtCore.QEvent.Wheel:
+                if event.modifiers() & Qt.ControlModifier:
+                    self._nudge_read_font(1 if event.angleDelta().y() > 0 else -1)
+                    return True
+            elif event.type() == QtCore.QEvent.NativeGesture:
+                if event.gestureType() == QtCore.Qt.NativeGestureType.ZoomNativeGesture:
+                    # El trackpad manda valores pequeños y continuos: se acumulan
+                    # y se da un paso de letra cada ~0,15 de gesto.
+                    self._zoom_accum += event.value()
+                    if abs(self._zoom_accum) >= 0.15:
+                        self._nudge_read_font(1 if self._zoom_accum > 0 else -1)
+                        self._zoom_accum = 0.0
+                    return True
         return super().eventFilter(obj, event)
 
     def _build_log_area(self, root_layout):
@@ -1251,42 +1863,62 @@ class MainWindow(QtWidgets.QMainWindow):
     # ── Pestaña «Preguntar» (RAG) ─────────────
     def _build_rag_tab(self):
         panel = QtWidgets.QWidget()
-        layout = QtWidgets.QVBoxLayout(panel)
-        layout.setContentsMargins(0, 8, 0, 0)
-        layout.setSpacing(10)
+        outer = QtWidgets.QVBoxLayout(panel)
+        outer.setContentsMargins(0, 8, 0, 0)
+        outer.setSpacing(0)
 
-        status_row = QtWidgets.QHBoxLayout()
+        # En compact no cabe todo: scroll como en Ajustes.
+        scroll = QtWidgets.QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QtWidgets.QFrame.NoFrame)
+        inner = QtWidgets.QWidget()
+        layout = QtWidgets.QVBoxLayout(inner)
+        layout.setContentsMargins(0, 0, 10, 4)
+        layout.setSpacing(10)
+        scroll.setWidget(inner)
+        outer.addWidget(scroll)
+
+        self._rag_status_row = QtWidgets.QBoxLayout(QtWidgets.QBoxLayout.LeftToRight)
+        self._rag_status_row.setSpacing(8)
         self.lbl_rag_status = QtWidgets.QLabel("Índice semántico: sin comprobar")
         self.lbl_rag_status.setObjectName("appSubtitle")
-        status_row.addWidget(self.lbl_rag_status, 1)
+        self.lbl_rag_status.setWordWrap(True)
+        self._rag_status_row.addWidget(self.lbl_rag_status, 1)
 
         self.btn_rag_key = QtWidgets.QPushButton("Ajustes")
         self.btn_rag_key.setCursor(Qt.PointingHandCursor)
         self.btn_rag_key.setToolTip("Elegir el redactor (IA), la clave API y el modelo")
         self.btn_rag_key.clicked.connect(lambda: self.tabs.setCurrentIndex(2))
-        status_row.addWidget(self.btn_rag_key)
 
         self.btn_rag_index = QtWidgets.QPushButton("Indexar")
         self.btn_rag_index.setCursor(Qt.PointingHandCursor)
         self.btn_rag_index.setToolTip("Indexar transcripciones nuevas o modificadas (semántica local)")
         self.btn_rag_index.clicked.connect(lambda: self._rag_start_index(reindex=False))
-        status_row.addWidget(self.btn_rag_index)
-        layout.addLayout(status_row)
 
-        ask_row = QtWidgets.QHBoxLayout()
+        # Los dos botones van juntos en una fila propia: en compact la etiqueta
+        # cae a su línea y ellos quedan debajo, lado a lado.
+        botones_estado = QtWidgets.QHBoxLayout()
+        botones_estado.setSpacing(8)
+        botones_estado.addWidget(self.btn_rag_key)
+        botones_estado.addWidget(self.btn_rag_index)
+        botones_estado.addStretch(1)
+        self._rag_status_row.addLayout(botones_estado)
+        layout.addLayout(self._rag_status_row)
+
+        self._rag_ask_row = QtWidgets.QBoxLayout(QtWidgets.QBoxLayout.LeftToRight)
+        self._rag_ask_row.setSpacing(8)
         self.rag_input = QtWidgets.QLineEdit()
         self.rag_input.setPlaceholderText("Pregunta sobre tus transcripciones: «¿qué dijo Dolina sobre los ángeles?»")
         self.rag_input.returnPressed.connect(self._rag_ask)
         self.rag_input.setMinimumHeight(36)
-        ask_row.addWidget(self.rag_input, 1)
+        self._rag_ask_row.addWidget(self.rag_input, 1)
 
         self.btn_rag_ask = QtWidgets.QPushButton("Preguntar")
         self.btn_rag_ask.setObjectName("primary")
         self.btn_rag_ask.setCursor(Qt.PointingHandCursor)
-        self.btn_rag_ask.setMinimumHeight(36)
         self.btn_rag_ask.clicked.connect(self._rag_ask)
-        ask_row.addWidget(self.btn_rag_ask)
-        layout.addLayout(ask_row)
+        self._rag_ask_row.addWidget(self.btn_rag_ask)
+        layout.addLayout(self._rag_ask_row)
 
         self.rag_answer = QtWidgets.QTextBrowser()
         self.rag_answer.setOpenLinks(False)
@@ -1295,14 +1927,44 @@ class MainWindow(QtWidgets.QMainWindow):
             "Si no configuras clave API, verás los fragmentos más relevantes."
         )
         self.rag_answer.anchorClicked.connect(self._on_rag_anchor)
+        self.rag_answer.setMinimumHeight(160)
         layout.addWidget(self.rag_answer, 3)
+
+        # ── Cuaderno de preguntas en PDF (botones con wrap) ──
+        self.btn_qa_save = QtWidgets.QPushButton("Añadir al cuaderno (PDF)")
+        self.btn_qa_save.setCursor(Qt.PointingHandCursor)
+        self.btn_qa_save.setToolTip(
+            "Guarda esta pregunta y su respuesta en el cuaderno PDF de la base\n"
+            "activa y lo regenera con todas las preguntas anteriores")
+        self.btn_qa_save.setEnabled(False)
+        self.btn_qa_save.clicked.connect(self._rag_save_qa)
+
+        self.chk_qa_open = QtWidgets.QCheckBox("Abrir PDF al guardar")
+        self.chk_qa_open.setChecked(True)
+        self.chk_qa_open.setToolTip("Abre el cuaderno en el visor de PDF tras cada guardado")
+
+        self.btn_qa_open = QtWidgets.QPushButton("Abrir cuaderno")
+        self.btn_qa_open.setCursor(Qt.PointingHandCursor)
+        self.btn_qa_open.clicked.connect(self._open_cuaderno)
+        self.btn_qa_open.setEnabled(False)
+
+        self.lbl_qa_cuaderno = QtWidgets.QLabel("")
+        self.lbl_qa_cuaderno.setObjectName("appSubtitle")
+        self.lbl_qa_cuaderno.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        layout.addWidget(self._flow_row(
+            [self.btn_qa_save, self.chk_qa_open, self.btn_qa_open, self.lbl_qa_cuaderno]))
 
         hits_label = QtWidgets.QLabel("PASAJES RECUPERADOS (clic para abrir en la transcripción)")
         hits_label.setObjectName("sectionLabel")
+        hits_label.setWordWrap(True)
         layout.addWidget(hits_label)
 
         self.rag_hits = QtWidgets.QListWidget()
-        self.rag_hits.setMaximumHeight(190)
+        # Sin techo: puede estirarse en vertical (la zona de «filas tupla»).
+        self.rag_hits.setMinimumHeight(110)
+        self.rag_hits.setWordWrap(True)
+        self.rag_hits.setTextElideMode(Qt.ElideNone)
+        self.rag_hits.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self.rag_hits.itemClicked.connect(self._on_rag_hit_clicked)
         layout.addWidget(self.rag_hits, 2)
 
@@ -1310,17 +1972,21 @@ class MainWindow(QtWidgets.QMainWindow):
 
     # ── Pestaña «Ajustes» ─────────────────────
     def _settings_row(self, etiqueta, campo):
-        """Fila «etiqueta: campo» con la etiqueta de ancho fijo."""
-        fila = QtWidgets.QHBoxLayout()
-        fila.setSpacing(10)
-        lbl = QtWidgets.QLabel(etiqueta)
-        lbl.setFixedWidth(180)
-        fila.addWidget(lbl)
+        """Fila etiqueta/campo que se apila sola en compact (responsive.FieldRow)."""
         if isinstance(campo, QtWidgets.QLayout):
-            fila.addLayout(campo, 1)
-        else:
-            fila.addWidget(campo, 1)
+            contenedor = QtWidgets.QWidget()
+            contenedor.setLayout(campo)
+            campo = contenedor
+        fila = FieldRow(etiqueta, campo)
+        fila.set_mode(getattr(self, "_layout_mode", MODE_WIDE))
+        self._field_rows.append(fila)
         return fila
+
+    def _flow_row(self, widgets):
+        """Hilera de botones que hace wrap en vez de comprimirse (FlowWidget)."""
+        contenedor = FlowWidget(widgets, hspacing=space(1), vspacing=space(1))
+        self._flow_rows.append(contenedor)
+        return contenedor
 
     def _build_settings_tab(self):
         panel = QtWidgets.QWidget()
@@ -1347,7 +2013,7 @@ class MainWindow(QtWidgets.QMainWindow):
         for clave, preset in LLM_PROVIDERS.items():
             self.cmb_provider.addItem(preset["label"], clave)
         self.cmb_provider.currentIndexChanged.connect(self._on_provider_changed)
-        layout.addLayout(self._settings_row("Redactor", self.cmb_provider))
+        layout.addWidget(self._settings_row("Redactor", self.cmb_provider))
 
         self.lbl_provider_hint = QtWidgets.QLabel("")
         self.lbl_provider_hint.setObjectName("appSubtitle")
@@ -1368,11 +2034,11 @@ class MainWindow(QtWidgets.QMainWindow):
             "Pregunta al servidor qué modelos tiene instalados (Ollama, LM Studio…)")
         self.btn_detect_models.clicked.connect(self._detect_models)
         modelo_fila.addWidget(self.btn_detect_models)
-        layout.addLayout(self._settings_row("Modelo", modelo_fila))
+        layout.addWidget(self._settings_row("Modelo", modelo_fila))
 
         self.edt_base_url = QtWidgets.QLineEdit()
         self.edt_base_url.setPlaceholderText("https://api.deepseek.com")
-        layout.addLayout(self._settings_row("Dirección (base_url)", self.edt_base_url))
+        layout.addWidget(self._settings_row("Dirección (base_url)", self.edt_base_url))
 
         clave_fila = QtWidgets.QHBoxLayout()
         clave_fila.setSpacing(8)
@@ -1388,10 +2054,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.btn_show_key.setToolTip("Mostrar u ocultar la clave")
         self.btn_show_key.toggled.connect(self._toggle_key_visibility)
         clave_fila.addWidget(self.btn_show_key)
-        layout.addLayout(self._settings_row("Clave API", clave_fila))
+        layout.addWidget(self._settings_row("Clave API", clave_fila))
 
-        nums = QtWidgets.QHBoxLayout()
-        nums.setSpacing(10)
         self.spn_temp = QtWidgets.QDoubleSpinBox()
         self.spn_temp.setRange(0.0, 1.5)
         self.spn_temp.setSingleStep(0.1)
@@ -1403,35 +2067,26 @@ class MainWindow(QtWidgets.QMainWindow):
         self.spn_max_tokens.setSingleStep(50)
         self.spn_max_tokens.setFixedWidth(100)
         self.spn_max_tokens.setToolTip("Longitud máxima de la respuesta redactada")
-        nums.addWidget(self.spn_temp)
-        nums.addWidget(QtWidgets.QLabel("temperatura"))
-        nums.addSpacing(22)
-        nums.addWidget(self.spn_max_tokens)
-        nums.addWidget(QtWidgets.QLabel("máx. tokens"))
-        nums.addStretch(1)
-        layout.addLayout(self._settings_row("Ajustes del modelo", nums))
+        nums = [self.spn_temp, QtWidgets.QLabel("temperatura"),
+                self.spn_max_tokens, QtWidgets.QLabel("máx. tokens")]
+        layout.addWidget(self._settings_row("Ajustes del modelo", self._flow_row(nums)))
 
-        botones = QtWidgets.QHBoxLayout()
-        botones.setSpacing(8)
         self.btn_llm_save = QtWidgets.QPushButton("Guardar")
         self.btn_llm_save.setObjectName("primary")
         self.btn_llm_save.setCursor(Qt.PointingHandCursor)
         self.btn_llm_save.clicked.connect(self._settings_save)
-        botones.addWidget(self.btn_llm_save)
 
         self.btn_llm_test = QtWidgets.QPushButton("Probar conexión")
         self.btn_llm_test.setCursor(Qt.PointingHandCursor)
         self.btn_llm_test.setToolTip("Hace una petición mínima al redactor con los datos del formulario")
         self.btn_llm_test.clicked.connect(self._llm_test)
-        botones.addWidget(self.btn_llm_test)
 
         self.btn_llm_reload = QtWidgets.QPushButton("Recargar del disco")
         self.btn_llm_reload.setCursor(Qt.PointingHandCursor)
         self.btn_llm_reload.setToolTip("Vuelve a leer rag_config.json (descarta cambios sin guardar)")
         self.btn_llm_reload.clicked.connect(self._settings_load)
-        botones.addWidget(self.btn_llm_reload)
-        botones.addStretch(1)
-        layout.addLayout(botones)
+        layout.addWidget(self._flow_row(
+            [self.btn_llm_save, self.btn_llm_test, self.btn_llm_reload]))
 
         self.lbl_llm_status = QtWidgets.QLabel("")
         self.lbl_llm_status.setObjectName("appSubtitle")
@@ -1448,21 +2103,17 @@ class MainWindow(QtWidgets.QMainWindow):
         seccion2.setObjectName("sectionLabel")
         layout.addWidget(seccion2)
 
-        lector = QtWidgets.QHBoxLayout()
-        lector.setSpacing(8)
         self.spn_font_size = QtWidgets.QSpinBox()
         self.spn_font_size.setRange(READ_FONT_MIN, READ_FONT_MAX)
         self.spn_font_size.setSuffix(" pt")
         self.spn_font_size.setFixedWidth(90)
         self.spn_font_size.setValue(self._ui_cfg["read_font_size"])
         self.spn_font_size.valueChanged.connect(self._on_font_spin_changed)
-        lector.addWidget(self.spn_font_size)
         btn_font_reset = QtWidgets.QPushButton(f"Restablecer ({READ_FONT_DEFAULT} pt)")
         btn_font_reset.setCursor(Qt.PointingHandCursor)
         btn_font_reset.clicked.connect(self._reset_read_font)
-        lector.addWidget(btn_font_reset)
-        lector.addStretch(1)
-        layout.addLayout(self._settings_row("Tamaño de letra", lector))
+        layout.addWidget(self._settings_row(
+            "Tamaño de letra", self._flow_row([self.spn_font_size, btn_font_reset])))
 
         # ── Datos e índice ──
         divisor2 = QtWidgets.QFrame()
@@ -1480,25 +2131,20 @@ class MainWindow(QtWidgets.QMainWindow):
         self.lbl_settings_info.setTextInteractionFlags(Qt.TextSelectableByMouse)
         layout.addWidget(self.lbl_settings_info)
 
-        datos = QtWidgets.QHBoxLayout()
-        datos.setSpacing(8)
         self.btn_index_now = QtWidgets.QPushButton("Indexar ahora")
         self.btn_index_now.setCursor(Qt.PointingHandCursor)
         self.btn_index_now.clicked.connect(lambda: self._rag_start_index(reindex=False))
-        datos.addWidget(self.btn_index_now)
 
         self.btn_index_rebuild = QtWidgets.QPushButton("Reindexar todo")
         self.btn_index_rebuild.setCursor(Qt.PointingHandCursor)
         self.btn_index_rebuild.setToolTip("Reconstruye el índice completo (tras cambiar de modelo)")
         self.btn_index_rebuild.clicked.connect(lambda: self._rag_start_index(reindex=True))
-        datos.addWidget(self.btn_index_rebuild)
 
         btn_open_dir = QtWidgets.QPushButton("Abrir carpeta de datos")
         btn_open_dir.setCursor(Qt.PointingHandCursor)
         btn_open_dir.clicked.connect(self._open_data_dir)
-        datos.addWidget(btn_open_dir)
-        datos.addStretch(1)
-        layout.addLayout(datos)
+        layout.addWidget(self._flow_row(
+            [self.btn_index_now, self.btn_index_rebuild, btn_open_dir]))
 
         self._settings_load()
         self._settings_refresh_info()
@@ -1724,6 +2370,7 @@ class MainWindow(QtWidgets.QMainWindow):
             if importlib.util.find_spec("fastembed") is None:
                 raise ImportError("falta el paquete fastembed")
             import rag  # import perezoso: la app funciona sin las dependencias RAG
+            rag.DB_PATH = DB_PATH  # la base activa puede haber cambiado en caliente
         except ImportError as exc:
             if not silent:
                 QtWidgets.QMessageBox.critical(
@@ -1867,6 +2514,77 @@ class MainWindow(QtWidgets.QMainWindow):
             )
         self.rag_answer.setHtml(html_doc)
         self._log(f"🔎 «{self.rag_input.text().strip()[:60]}» → {len(hits)} pasajes")
+
+        # Datos para poder añadir esta consulta al cuaderno PDF.
+        respuesta = (out.get("respuesta") or "").strip()
+        self._last_qa = {
+            "question": self.rag_input.text().strip(),
+            "answer": respuesta,
+            "sources": [
+                {"title": h.title, "video_id": h.video_id,
+                 "url": video_url(h.video_id, getattr(h, "url", None)),
+                 "score": round(float(h.score), 3),
+                 # El texto del pasaje viaja con la pregunta: es lo que se
+                 # imprime en el cuaderno PDF (no solo el enlace al vídeo).
+                 "text": (h.text or "").strip(),
+                 "start_char": int(getattr(h, "start_char", 0) or 0),
+                 "end_char": int(getattr(h, "end_char", 0) or 0)}
+                for h in hits
+            ],
+        }
+        self.btn_qa_save.setEnabled(bool(respuesta))
+        self.btn_qa_save.setToolTip(
+            "Guarda esta pregunta y su respuesta en el cuaderno PDF de la base activa"
+            if respuesta else
+            "No hay respuesta redactada que guardar: activa un redactor en «Ajustes»")
+
+    # ── Cuaderno de preguntas (PDF) ──
+    def _cuaderno_path(self) -> str:
+        return os.path.join(APP_DIR, f"cuaderno-{db_stem()}.pdf")
+
+    def _update_qa_widgets(self):
+        ruta = self._cuaderno_path()
+        existe = os.path.exists(ruta)
+        self.btn_qa_open.setEnabled(existe)
+        self.lbl_qa_cuaderno.setText(os.path.basename(ruta))
+        self.lbl_qa_cuaderno.setToolTip(ruta)
+        self.btn_qa_open.setToolTip(
+            f"Abre {os.path.basename(ruta)}" if existe
+            else "Aún no hay cuaderno: guarda una respuesta con «Añadir al cuaderno»")
+        return ruta
+
+    def _rag_save_qa(self):
+        qa = getattr(self, "_last_qa", None)
+        if not qa or not qa.get("answer"):
+            QtWidgets.QMessageBox.information(
+                self, "Sin respuesta redactada",
+                "Esta consulta no tiene una respuesta de texto que guardar.\n"
+                "Activa un redactor en «Ajustes» para que redacte la respuesta.")
+            return
+        cfg = load_rag_config()
+        try:
+            save_qa(qa["question"], qa["answer"], qa["sources"],
+                    cfg.get("provider", ""), cfg.get("model", ""))
+            entradas = get_qa_entries()
+            ruta = self._cuaderno_path()
+            _escribir_cuaderno_pdf(ruta, db_stem(), entradas)
+        except Exception as exc:  # noqa: BLE001
+            self._log(f"❌ Error creando el cuaderno: {exc}", "err")
+            QtWidgets.QMessageBox.critical(
+                self, "Error al guardar", f"No se pudo generar el PDF:\n\n{exc}")
+            return
+        self._log(f"📄 Cuaderno actualizado: {ruta} ({len(entradas)} preguntas)", "ok")
+        self._update_qa_widgets()
+        self.btn_qa_save.setEnabled(False)  # evita guardar dos veces la misma respuesta
+        if self.chk_qa_open.isChecked():
+            self._open_cuaderno()
+
+    def _open_cuaderno(self):
+        ruta = self._cuaderno_path()
+        if not os.path.exists(ruta):
+            self._log("El cuaderno aún no existe: guarda una respuesta primero.", "warn")
+            return
+        QtGui.QDesktopServices.openUrl(QUrl.fromLocalFile(ruta))
 
     def _on_rag_anchor(self, url):
         if url.scheme() == "hit":
@@ -2033,6 +2751,7 @@ class MainWindow(QtWidgets.QMainWindow):
             partes.append(html.escape(owner))
         partes.append(f"{len(content)} caracteres")
         self.lbl_meta.setText("  ·  ".join(partes))
+        self.lbl_meta.setVisible(True)
 
         self.texto.setPlainText(content)
 
@@ -2056,6 +2775,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self._refresh_list()
             self.lbl_title.setText("Selecciona o descarga una transcripción")
             self.lbl_meta.setText("")
+            self.lbl_meta.setVisible(False)
             self.texto.clear()
 
     def _modify_selected(self):
@@ -2153,10 +2873,57 @@ class MainWindow(QtWidgets.QMainWindow):
 
 
 # ─────────────────────────────────────────────
+def _ensure_initial_db():
+    """Resuelve la base activa al arrancar.
+
+    La primera vez pide un nombre (por defecto «transcripts»), de modo que se
+    pueda crear una base por tema: costura.db, cocina.db… Las siguientes
+    veces recuerda la última usada en ui_config.json. Si esa base ya no está
+    (la renombraste o moviste), ofrece las que sí existen en la carpeta en vez
+    de crear una vacía en silencio.
+    """
+    cfg = load_ui_config()
+    guardada = str(cfg.get("db_name") or "").strip()
+    if guardada:
+        ruta = db_initial_path()
+        if os.path.exists(ruta):
+            set_active_db(ruta)
+            return
+        disponibles = _bases_disponibles()
+        if disponibles:
+            eleccion, ok = QtWidgets.QInputDialog.getItem(
+                None, "Base de datos no encontrada",
+                f"No encuentro «{os.path.basename(ruta)}» en la carpeta de la app.\n\n"
+                "Elige con qué base quieres trabajar:",
+                disponibles, 0, False)
+            if ok and eleccion:
+                set_active_db(os.path.join(APP_DIR, eleccion))
+                save_ui_config(db_name=eleccion)
+                return
+        set_active_db(ruta)  # se vuelve a crear vacía, como antes
+        save_ui_config(db_name=os.path.basename(ruta))
+        return
+
+    nombre, ok = QtWidgets.QInputDialog.getText(
+        None, "Base de datos",
+        "Ponle nombre a tu base de datos.\n\n"
+        "Se creará «nombre.db» junto a la aplicación (por ejemplo, costura.db\n"
+        "o cocina.db). Si lo dejas vacío se usará la general: transcripts.db.\n\n"
+        "Nombre:",
+        text=DB_NAME_DEFAULT,
+    )
+    if not ok:
+        nombre = ""
+    nombre = _sanitize_db_name(nombre)
+    set_active_db(os.path.join(APP_DIR, nombre + ".db"))
+    save_ui_config(db_name=nombre + ".db")
+
+
 def main():
     app = QtWidgets.QApplication(sys.argv)
     app.setStyle("Fusion")  # base limpia y consistente para el QSS
     app.setStyleSheet(QSS)
+    _ensure_initial_db()
     win = MainWindow()
     win.show()
     sys.exit(app.exec())

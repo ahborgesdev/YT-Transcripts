@@ -29,3 +29,13 @@ ui_config.json
 
 # Caché local de PyInstaller (redirigida dentro del proyecto)
 .pyinstaller-cache/
+
+# Compilación Android (ver android/README.md)
+.venv-android/
+.android-build/
+
+# Copias de seguridad locales (no subir)
+backups/
+
+# capturas de la vista previa (preview_responsive.py)
+preview/

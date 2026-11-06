@@ -30,12 +30,15 @@ from typing import Iterable
 import numpy as np
 import requests
 
-# Misma resolución que BuscadorYT.py: junto al script o junto al ejecutable empaquetado
+# Misma resolución que BuscadorYT.py: junto al script o junto al ejecutable empaquetado.
+# La UI puede fijar la base activa con TRANSCRIP_DB_FILE (bases con nombre:
+# costura.db, cocina.db…); TRANSCRIP_DB se mantiene por compatibilidad (carpeta).
 if getattr(sys, "frozen", False):
     BASE_DIR = os.path.dirname(sys.executable)
 else:
     BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-DB_PATH = os.path.join(os.environ.get("TRANSCRIP_DB") or BASE_DIR, "transcripts.db")
+DB_PATH = (os.environ.get("TRANSCRIP_DB_FILE")
+           or os.path.join(os.environ.get("TRANSCRIP_DB") or BASE_DIR, "transcripts.db"))
 
 MODEL_NAME = "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"
 DIM = 384
@@ -61,8 +64,14 @@ class RagError(RuntimeError):
 # ─────────────────────────────────────────────
 # CONEXIÓN Y ESQUEMA
 # ─────────────────────────────────────────────
-def get_conn(path: str = DB_PATH) -> sqlite3.Connection:
-    conn = sqlite3.connect(path)
+def get_conn(path: str | None = None) -> sqlite3.Connection:
+    """Conexión a la base activa.
+
+    `path` se resuelve en cada llamada (no como valor por defecto, que quedaría
+    congelado al importar) para que la UI pueda cambiar de base de datos
+    reasignando `rag.DB_PATH`.
+    """
+    conn = sqlite3.connect(path or DB_PATH)
     conn.row_factory = sqlite3.Row
     return conn
 
@@ -333,6 +342,7 @@ def search(query: str, k: int = DEFAULT_K, conn: sqlite3.Connection | None = Non
     own = conn is None
     conn = conn or get_conn()
     try:
+        ensure_schema(conn)  # por si es una base recién creada (sin índice aún)
         mat, rows = _load_matrix(conn)
         if not rows:
             raise RagError("El índice está vacío. Ejecuta primero el indexado (python rag.py index).")

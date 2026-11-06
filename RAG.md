@@ -1,13 +1,14 @@
 # RAG en BuscadorYT — búsqueda semántica sobre tus transcripciones
 
 La pestaña **Preguntar** responde preguntas usando *solo* tus transcripciones
-guardadas, con citas al pasaje exacto. Todo el índice vive dentro de
-`transcripts.db`: no hay servidor vectorial ni servicio externo de búsqueda.
+guardadas, con citas al pasaje exacto. Todo el índice vive dentro de la base
+activa (`transcripts.db`, `costura.db`, `cocina.db`…): no hay servidor vectorial
+ni servicio externo de búsqueda. Cada base por tema tiene su propio índice.
 
 ## Cómo funciona
 
 ```
-transcripts.db ──► chunks (troceado ~900 chars) ──► embeddings locales (ONNX)
+<base>.db ──► chunks (troceado ~900 chars) ──► embeddings locales (ONNX)
                         │                                   │
                         └──────── chunk_vec (float32) ◄──────┘
 
@@ -41,6 +42,25 @@ pregunta ──► embedding ──► coseno top-k ──► 6 pasajes ──�
 
 Sin clave API funciona igualmente en **modo recuperación**: te muestra los
 pasajes más relevantes, clicables para saltar al texto.
+
+## Cuaderno de preguntas (PDF)
+
+«Añadir al cuaderno» guarda cada pregunta con su respuesta y los pasajes
+recuperados en `qa_log.sources` (JSON). Cada pasaje lleva `title`, `video_id`,
+`url`, `score`, y desde esta versión también `text` con **el fragmento exacto**
+(y sus `start_char`/`end_char`). El PDF `cuaderno-<base>.pdf` imprime, por cada
+pregunta: la respuesta y, bajo «Pasajes recuperados», cada fragmento entre
+comillas — el mismo texto que abre el clic en la app, sin depender de ir al
+vídeo. Las entradas antiguas (sin `text`) siguen imprimiéndose con el enlace.
+
+```json
+"sources": [
+  {"title": "…", "video_id": "WoBZ4oGnqgQ", "url": "https://youtu.be/…",
+   "score": 0.843, "text": "La ciencia es una manera de mirar…",
+   "start_char": 100, "end_char": 190}
+]
+```
+
 
 ## Redactor: elegir la IA (tab «Ajustes»)
 
