@@ -30,13 +30,13 @@ from typing import Iterable
 import numpy as np
 import requests
 
-# Misma resolución que BuscadorYT.py: junto al script o junto al ejecutable empaquetado.
-# La UI puede fijar la base activa con TRANSCRIP_DB_FILE (bases con nombre:
-# costura.db, cocina.db…); TRANSCRIP_DB se mantiene por compatibilidad (carpeta).
-if getattr(sys, "frozen", False):
-    BASE_DIR = os.path.dirname(sys.executable)
-else:
-    BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+# Los datos (bases, modelo) viven en la carpeta de datos del usuario, no junto
+# al ejecutable: ver paths.py. La UI puede fijar la base activa con
+# TRANSCRIP_DB_FILE (bases con nombre: costura.db, cocina.db…); TRANSCRIP_DB se
+# mantiene por compatibilidad (carpeta).
+from paths import DATA_DIR, models_dir
+
+BASE_DIR = DATA_DIR
 DB_PATH = (os.environ.get("TRANSCRIP_DB_FILE")
            or os.path.join(os.environ.get("TRANSCRIP_DB") or BASE_DIR, "transcripts.db"))
 
@@ -182,7 +182,7 @@ def get_embedder():
             raise RagError(
                 "Falta fastembed. Instálalo con:  pip install fastembed"
             ) from exc
-        cache_dir = os.environ.get("FASTEMBED_CACHE_PATH") or os.path.join(BASE_DIR, "models")
+        cache_dir = os.environ.get("FASTEMBED_CACHE_PATH") or models_dir()
         _embedder = TextEmbedding(model_name=MODEL_NAME, cache_dir=cache_dir)
     return _embedder
 

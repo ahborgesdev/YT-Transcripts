@@ -84,6 +84,16 @@ modelo → **Probar conexión** → **Guardar**.
 | `ui_config.json` | preferencias de interfaz (tamaño de letra y base activa) |
 | `models/` | modelo de embeddings descargado en la primera indexación |
 
+Todo eso vive en la **carpeta de datos del usuario**, fuera de la aplicación:
+
+- macOS: `~/Library/Application Support/BuscadorYT/`
+- Windows: `%APPDATA%\BuscadorYT\`
+- Linux: `~/.local/share/BuscadorYT/`
+
+Al arrancar se crea si no existe y, la primera vez, se copian ahí las bases que
+hubiera junto al ejecutable (instalación antigua). Se puede forzar otra carpeta
+con `BUSCADORYT_DATA_DIR`.
+
 Sin redactor, o con Ollama, **nada sale del equipo**: solo se descargan subtítulos
 de YouTube cuando lo pides. Con un redactor en la nube se envían la pregunta y los
 seis pasajes recuperados, nunca la base de datos completa.
@@ -107,7 +117,7 @@ macOS, en local:
 ```bash
 PYINSTALLER_CONFIG_DIR="$PWD/.pyinstaller-cache" \
   .venv/bin/pyinstaller --clean --noconfirm BuscadorYT.spec
-# → dist/BuscadorYT
+# → dist/BuscadorYT.app (y dist/BuscadorYT)
 ```
 
 Windows 10+: PyInstaller no cross-compila, así que se compila en GitHub Actions
@@ -160,6 +170,7 @@ de un vistazo (con el breakpoint activo marcado en cada una).
 | `rag.py` | troceado, embeddings, índice, búsqueda y llamada al redactor |
 | `responsive.py` | breakpoints, `FieldRow` y `FlowLayout` (mobile-first) |
 | `preview_responsive.py` | capturas a tamaños de móvil, tableta y PC + galería HTML |
+| `paths.py` | carpeta de datos del usuario (Application Support / APPDATA / XDG) y migración |
 | `BuscadorYT.spec` | receta de empaquetado con PyInstaller |
 | `make_guia.py` | genera la guía de uso (DOCX → PDF) |
 | `RAG.md` | documentación técnica del índice y de los proveedores de IA |

@@ -4,6 +4,8 @@
 #
 # Uso:  pyinstaller --clean --noconfirm BuscadorYT.spec
 
+import os
+
 from PyInstaller.utils.hooks import collect_all
 
 datas = []
@@ -74,4 +76,20 @@ exe = EXE(
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
+)
+
+# ── Bundle de macOS ──────────────────────────────────────────
+# .app de verdad, con icono; los datos viven fuera (Application Support),
+# así el bundle es de solo lectura y se puede actualizar sin tocar nada.
+app = BUNDLE(
+    exe,
+    name="BuscadorYT.app",
+    icon="BuscadorYT.icns" if os.path.exists("BuscadorYT.icns") else None,
+    bundle_identifier="es.buscadoryt.app",
+    info_plist={
+        "CFBundleName": "BuscadorYT",
+        "CFBundleDisplayName": "BuscadorYT",
+        "NSHighResolutionCapable": True,
+        "LSMinimumSystemVersion": "11.0",
+    },
 )

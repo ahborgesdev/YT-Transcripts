@@ -371,15 +371,15 @@ def read_font_qss(size_pt: int) -> str:
 
 
 # ─────────────────────────────────────────────
-# BASE DE DATOS
+# DATOS
 # ─────────────────────────────────────────────
-# En desarrollo la BD vive junto al script; en una app empaquetada con
-# PyInstaller, junto al ejecutable (para que los datos persistan, ya que
-# `__file__` dentro del empaquetado apunta a un directorio temporal).
-if getattr(sys, "frozen", False):
-    APP_DIR = os.path.dirname(sys.executable)
-else:
-    APP_DIR = os.path.dirname(os.path.abspath(__file__))
+# Las bases, cuadernos y configuración viven en la carpeta de datos del
+# usuario (Application Support / %APPDATA% / XDG), fuera del ejecutable o del
+# `.app`, para que actualizar la app no toque los datos.
+from paths import DATA_DIR, migrate_legacy_data
+
+APP_DIR = DATA_DIR            # compatibilidad con el resto del código
+MIGRATED_FILES = migrate_legacy_data()
 
 DB_PATH = os.path.join(APP_DIR, "transcripts.db")
 UI_CONFIG_PATH = os.path.join(APP_DIR, "ui_config.json")
@@ -1254,6 +1254,8 @@ class MainWindow(ResponsiveMixin, QtWidgets.QMainWindow):
                 f"No se pudo preparar la base de datos:\n{DB_PATH}\n\n{exc}")
         self._update_qa_widgets()
         self._log(f"🗂  Base de datos activa: {os.path.basename(DB_PATH)}")
+        if MIGRATED_FILES:
+            self._log(f"📦 Datos migrados a {APP_DIR} ({len(MIGRATED_FILES)} elementos)")
 
         if not YT_API_AVAILABLE:
             self._log("⚠️  Módulo 'youtube-transcript-api' no encontrado.\n"
