@@ -1287,6 +1287,8 @@ class MainWindow(ResponsiveMixin, QtWidgets.QMainWindow):
                 QtWidgets.QBoxLayout.TopToBottom if apilada
                 else QtWidgets.QBoxLayout.LeftToRight)
             header.setStretch(1, 0 if apilada else 1)
+            header.invalidate()
+            self._header_widget.updateGeometry()
 
         splitter = getattr(self, "_splitter", None)
         if splitter is not None:
@@ -2069,8 +2071,9 @@ class MainWindow(ResponsiveMixin, QtWidgets.QMainWindow):
         self.spn_max_tokens.setSingleStep(50)
         self.spn_max_tokens.setFixedWidth(100)
         self.spn_max_tokens.setToolTip("Longitud máxima de la respuesta redactada")
-        nums = [self.spn_temp, QtWidgets.QLabel("temperatura"),
-                self.spn_max_tokens, QtWidgets.QLabel("máx. tokens")]
+        # Etiqueta antes del campo: «temperatura: 0,2  máx. tokens: 900».
+        nums = [QtWidgets.QLabel("temperatura"), self.spn_temp,
+                QtWidgets.QLabel("máx. tokens"), self.spn_max_tokens]
         layout.addWidget(self._settings_row("Ajustes del modelo", self._flow_row(nums)))
 
         self.btn_llm_save = QtWidgets.QPushButton("Guardar")

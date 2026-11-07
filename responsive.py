@@ -144,7 +144,7 @@ class FlowWidget(QtWidgets.QWidget):
             self.flow.addWidget(widget)
         policy = self.sizePolicy()
         policy.setHeightForWidth(True)
-        policy.setHorizontalPolicy(QtWidgets.QSizePolicy.Maximum)
+        policy.setHorizontalPolicy(QtWidgets.QSizePolicy.Expanding)
         policy.setVerticalPolicy(QtWidgets.QSizePolicy.Preferred)
         self.setSizePolicy(policy)
 

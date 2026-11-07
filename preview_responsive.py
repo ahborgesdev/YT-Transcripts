@@ -156,6 +156,8 @@ def main() -> int:
         ventana.resize(width, height)
         for pestaña, indice in pestañas:
             ventana.tabs.setCurrentIndex(indice)
+            for _ in range(4):      # deja que Qt asiente el layout tras el resize
+                app.processEvents()
             if args.select is not None and indice == 0:
                 ventana.listbox.setCurrentRow(args.select)
             if args.reading:
