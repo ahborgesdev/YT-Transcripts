@@ -36,7 +36,15 @@ def _code_dir() -> str:
 CODE_DIR = _code_dir()
 DATA_DIR = (os.environ.get("BUSCADORYT_DATA_DIR")
             or os.path.join(_platform_data_root(), APP_NAME))
-os.makedirs(DATA_DIR, exist_ok=True)
+
+DATA_DIR_FALLBACK = False
+try:
+    os.makedirs(DATA_DIR, exist_ok=True)
+except OSError:
+    # Sin permiso para crear la carpeta del usuario: último recurso, junto al
+    # ejecutable (mejor arrancar con los datos al lado que no arrancar).
+    DATA_DIR = CODE_DIR
+    DATA_DIR_FALLBACK = True
 
 
 def data_path(*parts: str) -> str:
