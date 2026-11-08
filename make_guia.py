@@ -236,7 +236,7 @@ p_pr.append(p_bdr)
 
 meta = doc.add_paragraph()
 meta.paragraph_format.space_after = Pt(2)
-run = meta.add_run("Versión 1.0 · Noviembre de 2026")
+run = meta.add_run("Versión 1.1 · Noviembre de 2026")
 run.font.size = Pt(10)
 run.font.color.rgb = MUTED
 
@@ -348,6 +348,31 @@ vineta("En «Ajustes» → Lector tienes el control exacto, de 12 a 40 pt.")
 aviso("El lector no está pensado para editar: es un visor. Puedes seleccionar y copiar, pero "
       "no modificar el texto original.")
 
+doc.add_heading("Modo lectura", level=2)
+doc.add_paragraph(
+    "Para leer de verdad, el lector puede ocupar toda la ventana: pulsa el botón ⛶ de la "
+    "fila del lector, la tecla F11 o haz doble clic en una transcripción de la lista. "
+    "Desaparecen la lista, la cabecera y el registro, y queda solo el texto. Se sale con "
+    "Esc o con el mismo botón."
+)
+doc.add_paragraph(
+    "Dentro del modo lectura aparece el botón ▭: activado limita el ancho de las líneas "
+    "(una columna cómoda, centrada); desactivado usa todo el ancho de la ventana. Tú eliges."
+)
+imagen("_captura_lectura_guia.png", 16.2,
+       "Figura 3. Modo lectura con columna cómoda, en una ventana de escritorio.")
+
+doc.add_heading("Ventanas pequeñas y móvil", level=2)
+doc.add_paragraph(
+    "La interfaz es la misma en un Mac y en una pantalla pequeña: se adapta sola. Por debajo "
+    "de unos 600 puntos de ancho, la cabecera se apila, el panel izquierdo pasa encima de las "
+    "pestañas y los formularios ponen la etiqueta sobre el campo."
+)
+vineta("El desplazamiento es global: si la ventana no da de sí, todo el contenido sube y baja.")
+vineta("El registro viene oculto; se muestra con el interruptor ▸ / ▾ de su fila y la app "
+       "recuerda tu elección.")
+vineta("El zoom de letra sigue disponible: A−/A+, Ctrl + rueda y pellizco del trackpad.")
+
 # ── 6. Preguntar ─────────────────────────────
 doc.add_heading("6. Preguntar a tus transcripciones", level=1)
 doc.add_paragraph(
@@ -379,6 +404,17 @@ vineta("Las preguntas concretas funcionan mejor que las genéricas: «¿qué dij
 vineta("Los nombres propios y las cifras suelen discriminar muy bien entre vídeos.")
 vineta("Si responde que el contexto no basta, casi siempre significa que el tema no está en "
        "tus transcripciones: no es un fallo, es que no inventa.")
+
+doc.add_heading("Guardar en el cuaderno (PDF)", level=2)
+doc.add_paragraph(
+    "Cuando una respuesta te sirva, pulsa «Añadir al cuaderno (PDF)». La app guarda la "
+    "pregunta, la respuesta y los pasajes exactos en los que se apoya, y regenera "
+    "«cuaderno-<base>.pdf» con todas las preguntas de esa base."
+)
+vineta("Cada pasaje se imprime con su título y el fragmento literal entre comillas: el mismo "
+       "texto que abres al pulsar la cita, no solo un enlace al vídeo.")
+vineta("El cuaderno se puede imprimir, anotar o archivar; se regenera desde la base de datos.")
+vineta("Si marcas «Abrir PDF al guardar», el visor del sistema se abre con el cuaderno actualizado.")
 
 # ── 7. Redactor ──────────────────────────────
 doc.add_heading("7. Elegir la IA que redacta (Ajustes)", level=1)
@@ -430,15 +466,23 @@ vineta("«Temperatura» (0–1,5): más baja, respuestas más literales; más al
 # ── 8. Datos ─────────────────────────────────
 doc.add_heading("8. Dónde están tus datos", level=1)
 doc.add_paragraph(
-    "En la versión empaquetada, estos archivos viven en la misma carpeta que el ejecutable; "
-    "en la versión de desarrollo, junto al archivo BuscadorYT.py."
+    "Los datos viven fuera de la aplicación, en la carpeta de datos del usuario, para que "
+    "puedas actualizar o mover la app sin perder nada:"
+)
+vineta("macOS: ~/Library/Application Support/BuscadorYT/")
+vineta("Windows: %APPDATA%\\BuscadorYT\\")
+vineta("Linux: ~/.local/share/BuscadorYT/")
+doc.add_paragraph(
+    "La primera vez que arranca, la app copia ahí las bases que hubiera junto al ejecutable "
+    "(instalación antigua). El menú «Abrir carpeta de datos» te lleva directo."
 )
 tabla(
     ["Archivo", "Qué contiene"],
     [
-        ["transcripts.db", "Tus transcripciones, el índice semántico (fragmentos y vectores) y el control de cambios."],
+        ["<nombre>.db", "Cada tema: transcripciones, índice semántico (fragmentos y vectores) y preguntas guardadas."],
+        ["cuaderno-<nombre>.pdf", "El cuaderno de preguntas y respuestas de esa base."],
         ["rag_config.json", "El redactor elegido, su dirección, el modelo y tu clave API si la usas."],
-        ["ui_config.json", "Preferencias de la interfaz, como el tamaño de letra."],
+        ["ui_config.json", "Preferencias: tamaño de letra, base activa y si el registro está visible."],
         ["models/", "El modelo de búsqueda (unos 240 MB), descargado en la primera indexación."],
     ],
     anchos=[4.2, 12.4],
@@ -493,11 +537,12 @@ doc.add_paragraph("Ejecución en desarrollo, desde la carpeta del proyecto:")
 tabla(
     ["Tarea", "Comando"],
     [
-        ["Instalar dependencias", ".venv/bin/python -m pip install -r requirements.txt"],
+        ["Instalar dependencias", "python3 -m venv .venv && .venv/bin/python -m pip install -r requirements.txt"],
         ["Abrir la app", ".venv/bin/python BuscadorYT.py"],
         ["Indexar por consola", ".venv/bin/python rag.py index"],
         ["Probar la búsqueda", '.venv/bin/python rag.py search "consulta" -k 6'],
-        ["Recompilar el ejecutable",
+        ["Vista previa por tamaños", ".venv/bin/python preview_responsive.py --tab all --open"],
+        ["Compilar .app",
          'PYINSTALLER_CONFIG_DIR="$PWD/.pyinstaller-cache" .venv/bin/python -m PyInstaller --clean --noconfirm BuscadorYT.spec'],
     ],
     anchos=[4.6, 12.0],
@@ -506,7 +551,9 @@ tabla(
 doc.add_heading("Cómo está organizado", level=2)
 vineta("BuscadorYT.py: interfaz, base de datos, descarga y exportación a PDF.", "Aplicación. ")
 vineta("rag.py: troceado, embeddings, índice, búsqueda y llamada al redactor.", "RAG. ")
-vineta("BuscadorYT.spec: receta de empaquetado en un único ejecutable.", "Build. ")
+vineta("paths.py: carpeta de datos del usuario y migración.", "Datos. ")
+vineta("responsive.py: breakpoints, filas adaptativas y flow de botones.", "Interfaz. ")
+vineta("BuscadorYT.spec: receta de empaquetado (ejecutable y .app).", "Build. ")
 vineta("RAG.md: explicación técnica del índice y de los proveedores de IA.", "Documentación. ")
 
 doc.add_heading("Licencias", level=2)
