@@ -139,6 +139,12 @@ Las filas de formulario (`FieldRow`) miran además **su propio ancho**: por
 debajo de 460 dp la etiqueta pasa encima del campo, aunque la ventana vaya en
 `medium`. Los botones usan `FlowLayout`, que hace wrap en vez de comprimirse.
 
+### Scroll global y registro
+
+Toda la ventana va dentro de un scroll (barra fina y discreta): en móvil o en
+ventanas bajas nada se queda inalcanzable. El **registro viene oculto**; se
+muestra con el interruptor **▸ / ▾** de su fila y la preferencia se recuerda.
+
 ### Modo lectura
 
 El lector puede ocupar toda la ventana, sin lista ni registro: botón **⛶** en la

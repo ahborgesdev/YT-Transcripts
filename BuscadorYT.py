@@ -285,6 +285,21 @@ QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical {
     background: transparent;
     height: 0px;
 }
+/* Barra del scroll global: fina y discreta, para no romper la calma */
+QScrollArea#outerScroll QScrollBar:vertical {
+    width: 6px;
+    background: transparent;
+    margin: 0px;
+}
+QScrollArea#outerScroll QScrollBar::handle:vertical {
+    background: #2b2b38;
+    border-radius: 3px;
+    min-height: 24px;
+}
+QScrollArea#outerScroll QScrollBar::handle:vertical:hover {
+    background: #3c3c4d;
+}
+
 QScrollBar:horizontal {
     background: transparent;
     height: 10px;
@@ -392,7 +407,7 @@ READ_FONT_MAX = 40
 
 def load_ui_config() -> dict:
     """Preferencias de la interfaz (tamaño de letra del lector, etc.)."""
-    cfg = {"read_font_size": READ_FONT_DEFAULT}
+    cfg = {"read_font_size": READ_FONT_DEFAULT, "log_visible": False}
     if os.path.exists(UI_CONFIG_PATH):
         try:
             with open(UI_CONFIG_PATH, "r", encoding="utf-8") as fh:
@@ -1468,11 +1483,20 @@ class MainWindow(ResponsiveMixin, QtWidgets.QMainWindow):
     # ── Layout principal ──────────────────────
     def _build_ui(self):
         central = QtWidgets.QWidget()
-        self.setCentralWidget(central)
         root = QtWidgets.QVBoxLayout(central)
         root.setContentsMargins(20, 18, 20, 16)
         root.setSpacing(14)
         self._root_layout = root
+
+        # Scroll global, con barra casi invisible: en pantallas pequeñas todo
+        # es alcanzable aunque la ventana no dé de sí (móvil, ventanas bajas).
+        self._outer_scroll = QtWidgets.QScrollArea()
+        self._outer_scroll.setObjectName("outerScroll")
+        self._outer_scroll.setWidgetResizable(True)
+        self._outer_scroll.setFrameShape(QtWidgets.QFrame.NoFrame)
+        self._outer_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self._outer_scroll.setWidget(central)
+        self.setCentralWidget(self._outer_scroll)
 
         # ── Cabecera ──
         header = QtWidgets.QBoxLayout(QtWidgets.QBoxLayout.LeftToRight)
@@ -1539,13 +1563,32 @@ class MainWindow(ResponsiveMixin, QtWidgets.QMainWindow):
         splitter.addWidget(self._build_right_panel())
         splitter.setSizes([380, 800])
 
-        # ── Registro (siempre visible, debajo del splitter) ──
+        # ── Registro (oculto por defecto: el interruptor lo muestra) ──
+        log_row = QtWidgets.QHBoxLayout()
+        log_row.setSpacing(6)
         log_label = QtWidgets.QLabel("REGISTRO")
         log_label.setObjectName("sectionLabel")
         log_label.setWordWrap(True)
+        log_row.addWidget(log_label)
+        log_row.addStretch(1)
+
+        self.btn_log = QtWidgets.QPushButton("▸")
+        self.btn_log.setObjectName("fontBtn")
+        self.btn_log.setCursor(Qt.PointingHandCursor)
+        self.btn_log.setCheckable(True)
+        self.btn_log.setToolTip("Mostrar u ocultar el registro")
+        self.btn_log.toggled.connect(self._toggle_log)
+        log_row.addWidget(self.btn_log)
+
         self._log_label = log_label
-        root.addWidget(log_label)
+        root.addLayout(log_row)
         self._build_log_area(root)
+
+        visible = bool(self._ui_cfg.get("log_visible", False))
+        self.btn_log.blockSignals(True)
+        self.btn_log.setChecked(visible)
+        self.btn_log.blockSignals(False)
+        self._aplicar_log_visible(visible)
 
     # ── Panel izquierdo: descarga + lista ─────
     def _build_left_panel(self):
@@ -1768,8 +1811,10 @@ class MainWindow(ResponsiveMixin, QtWidgets.QMainWindow):
         """Oculta todo lo que no sea el texto; el lector ocupa la ventana."""
         self._reading = bool(activo)
         for widget in (self._header_widget, self._divider, self._left_panel,
-                       self._log_label, self.log_area):
+                       self._log_label, self.btn_log):
             widget.setVisible(not self._reading)
+        # El registro vuelve con su propio interruptor, no siempre.
+        self.log_area.setVisible((not self._reading) and self.btn_log.isChecked())
         self.tabs.tabBar().setVisible(not self._reading)
         # Un splitter con un hijo oculto sigue contando su ancho mínimo:
         # se colapsa el panel izquierdo a 0 para que el texto use toda la ventana.
@@ -1854,6 +1899,16 @@ class MainWindow(ResponsiveMixin, QtWidgets.QMainWindow):
                         self._zoom_accum = 0.0
                     return True
         return super().eventFilter(obj, event)
+
+    def _toggle_log(self, visible: bool):
+        """Interruptor del registro: tranquilidad visual a demanda."""
+        self._aplicar_log_visible(visible)
+        save_ui_config(log_visible=visible)
+
+    def _aplicar_log_visible(self, visible: bool):
+        self.log_area.setVisible(visible)
+        self.btn_log.setText("▾" if visible else "▸")
+        self.btn_log.setToolTip("Ocultar registro" if visible else "Mostrar registro")
 
     def _build_log_area(self, root_layout):
         self.log_area = QtWidgets.QTextEdit()
