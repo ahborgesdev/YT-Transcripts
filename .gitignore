@@ -39,3 +39,6 @@ backups/
 
 # capturas de la vista previa (preview_responsive.py)
 preview/
+
+# volcado de datos que hace el backup
+transcrip/_datos/
