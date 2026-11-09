@@ -1,0 +1,9 @@
+# Herramientas del equipo que compila (no se empaquetan en la APK).
+# PySide6 se instala aparte en build.sh (se reutiliza el del sistema si ya está).
+pkginfo
+jinja2
+tqdm
+packaging==24.1
+buildozer==1.6.0
+cython==0.29.37
+cmake

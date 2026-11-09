@@ -1,0 +1,14 @@
+# Código de la app copiado por build.sh (la fuente es ../BuscadorYT.py)
+app/*
+!app/.gitkeep
+
+# Dependencias puras para Android (las genera scripts/prepare_vendor.py)
+vendor/*
+!vendor/.gitkeep
+
+# Artefactos de compilación
+dist/
+deployment/
+.buildozer/
+buildozer.spec
+*.apk
