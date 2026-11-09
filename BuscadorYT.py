@@ -1276,6 +1276,21 @@ class MainWindow(ResponsiveMixin, QtWidgets.QMainWindow):
             self._log("⚠️  Módulo 'youtube-transcript-api' no encontrado.\n"
                       "   Instálalo con:  pip install youtube-transcript-api\n", "warn")
 
+    def _touch_scroll(self, area):
+        """Permite arrastrar con el dedo (Android) en una zona con scroll.
+
+        En escritorio no hace nada: allí el scroll es con rueda/trackpad. En
+        Android, QScrollArea no se desplaza con el dedo sin QScroller.
+        """
+        if not (sys.platform == "android" or os.environ.get("ANDROID_ARGUMENT")):
+            return
+        try:
+            from PySide6.QtWidgets import QScroller
+            QScroller.grabGesture(
+                area.viewport(), QScroller.ScrollerGestureType.TouchGesture)
+        except Exception:  # noqa: BLE001 — si falla, se sigue pudiendo usar la barra
+            pass
+
     # ── Responsividad (mobile-first) ──────────
     def _apply_breakpoint(self, mode):
         """Recoloca la ventana según el ancho: compact / medium / wide.
@@ -1497,6 +1512,7 @@ class MainWindow(ResponsiveMixin, QtWidgets.QMainWindow):
         self._outer_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self._outer_scroll.setWidget(central)
         self.setCentralWidget(self._outer_scroll)
+        self._touch_scroll(self._outer_scroll)
 
         # ── Cabecera ──
         header = QtWidgets.QBoxLayout(QtWidgets.QBoxLayout.LeftToRight)
@@ -1935,6 +1951,7 @@ class MainWindow(ResponsiveMixin, QtWidgets.QMainWindow):
         layout.setContentsMargins(0, 0, 10, 4)
         layout.setSpacing(10)
         scroll.setWidget(inner)
+        self._touch_scroll(scroll)
         outer.addWidget(scroll)
 
         self._rag_status_row = QtWidgets.QBoxLayout(QtWidgets.QBoxLayout.LeftToRight)
@@ -2061,6 +2078,7 @@ class MainWindow(ResponsiveMixin, QtWidgets.QMainWindow):
         layout.setContentsMargins(0, 0, 10, 4)
         layout.setSpacing(6)
         scroll.setWidget(inner)
+        self._touch_scroll(scroll)
         outer.addWidget(scroll)
 
         # ── Redacción con IA ──

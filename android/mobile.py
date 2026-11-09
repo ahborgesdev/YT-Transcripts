@@ -27,6 +27,14 @@ def _hide_label(win: QtWidgets.QWidget, text: str) -> None:
             label.hide()
 
 
+def _content(win: QtWidgets.QWidget) -> QtWidgets.QWidget:
+    """Widget con el layout raíz (detrás del scroll global, si lo hay)."""
+    scroll = getattr(win, "_outer_scroll", None)
+    if scroll is not None and scroll.widget() is not None:
+        return scroll.widget()
+    return win.centralWidget()
+
+
 def _hide_subtitle(win: QtWidgets.QWidget) -> None:
     """La cabecera de escritorio ocupa dos líneas: en móvil sobra."""
     for label in win.findChildren(QtWidgets.QLabel):
@@ -37,11 +45,15 @@ def _hide_subtitle(win: QtWidgets.QWidget) -> None:
 
 def _compact_header(win: QtWidgets.QWidget) -> None:
     """Pone el selector de base de datos en su propia fila."""
-    root = win.centralWidget().layout()
+    root = _content(win).layout()
     if root is None or root.count() == 0:
         return
     header_item = root.itemAt(0)
     header = header_item.layout() if header_item is not None else None
+    # La cabecera puede ser un widget (con su propio layout) en vez de un
+    # layout suelto: se acepta cualquiera de las dos formas.
+    if header is None and header_item is not None and header_item.widget() is not None:
+        header = header_item.widget().layout()
     if header is None:
         return
 
@@ -212,7 +224,7 @@ def apply_mobile_layout(win: QtWidgets.QMainWindow) -> None:
     if menu_bar is not None:
         menu_bar.hide()
 
-    for layout in (win.centralWidget().layout(),):
+    for layout in (_content(win).layout(),):
         if layout is not None:
             layout.setContentsMargins(10, 8, 10, 8)
             layout.setSpacing(8)
