@@ -33,6 +33,7 @@ PACKAGES = [
     "charset-normalizer==3.5.2",
     "defusedxml==0.7.1",
     "youtube-transcript-api==1.2.4",
+    "reportlab==4.4.10",
 ]
 
 # Módulos de los que depende la app en tiempo de ejecución.
@@ -44,6 +45,7 @@ IMPORTS = [
     "charset_normalizer",
     "defusedxml",
     "youtube_transcript_api",
+    "reportlab",
 ]
 
 
@@ -92,14 +94,39 @@ def _write_ca_bundle() -> None:
     )
 
 
+def _patch_reportlab() -> None:
+    """Hace que reportlab funcione sin Pillow (solo PDFs de texto).
+
+    reportlab 4.x importa PIL de forma incondicional en `lib/utils.py`; la app
+    solo genera PDFs de texto (sin imágenes), así que ese import se vuelve
+    opcional. Pillow se elimina antes porque sus extensiones nativas (.so) no
+    sirven para Android.
+    """
+    utils = VENDOR / "reportlab" / "lib" / "utils.py"
+    if not utils.exists():
+        print("[vendor] aviso: no se encontró reportlab/lib/utils.py", file=sys.stderr)
+        return
+    text = utils.read_text(encoding="utf-8")
+    old = "from PIL import Image"
+    new = "try:\n    from PIL import Image\nexcept ImportError:\n    Image = None"
+    if old not in text:
+        print("[vendor] aviso: no se encontró el import de PIL", file=sys.stderr)
+        return
+    utils.write_text(text.replace(old, new, 1), encoding="utf-8")
+    print("[vendor] reportlab parcheado (sin PIL)")
+
+
 def _verify() -> None:
     imports = ";".join(f"__import__({name!r})" for name in IMPORTS)
     code = (
-        "import sys;"
+        "import sys, io;"
         f"sys.path.insert(0, {str(VENDOR)!r});"
         f"{imports};"
         "from _cacert import CA_PEM;"
         "assert 'BEGIN CERTIFICATE' in CA_PEM;"
+        "from reportlab.pdfgen import canvas;"
+        "c = canvas.Canvas(io.BytesIO());"
+        "c.drawString(10, 10, 'ok'); c.showPage(); c.save();"
         "print('[vendor] import OK')"
     )
     # -S: sin site-packages, para demostrar que sólo se usa lo empaquetado.
@@ -112,6 +139,12 @@ def main() -> None:
     VENDOR.mkdir(parents=True)
     _pip_install()
     _strip_native_and_cache()
+    # reportlab trae Pillow de regalo (imágenes, con extensiones nativas); la
+    # app no usa imágenes, así que se quita Pillow y se parchea reportlab.
+    shutil.rmtree(VENDOR / "PIL", ignore_errors=True)
+    for dist in list(VENDOR.glob("Pillow*.dist-info")) + list(VENDOR.glob("pillow*.dist-info")):
+        shutil.rmtree(dist, ignore_errors=True)
+    _patch_reportlab()
     _write_ca_bundle()
     _verify()
 

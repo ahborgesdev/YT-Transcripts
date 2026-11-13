@@ -13,7 +13,7 @@ android_packages = buildozer==1.6.0,cython==0.29.37
 [qt]
 qml_files = 
 excluded_qml_plugins = 
-modules = Core,Gui,Widgets
+modules = Core,Widgets,Gui
 plugins = 
 
 [android]

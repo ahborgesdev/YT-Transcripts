@@ -62,6 +62,25 @@ open(path, "w", encoding="utf-8").write(text)
 print("  android.skip_update = True añadido a [app]")
 PY
 
+say "2b/3 Añadiendo permiso de «todos los archivos» (para exportar a Descargas)"
+"$VENV/bin/python" - "$HERE/buildozer.spec" <<'PY'
+import sys
+
+path = sys.argv[1]
+text = open(path, encoding="utf-8").read()
+perm = "android.permission.MANAGE_EXTERNAL_STORAGE"
+if perm in text:
+    print("  ya estaba puesto")
+    sys.exit(0)
+needle = "android.permissions = "
+if needle in text:
+    text = text.replace(needle, needle + perm + ", ", 1)
+    open(path, "w", encoding="utf-8").write(text)
+    print("  MANAGE_EXTERNAL_STORAGE añadido")
+else:
+    print("  no se encontró android.permissions (se omite)", file=sys.stderr)
+PY
+
 say "3/3 Compilando con buildozer (20-40 min la primera vez)"
 cd "$HERE"
 "$VENV/bin/python" -m buildozer android debug

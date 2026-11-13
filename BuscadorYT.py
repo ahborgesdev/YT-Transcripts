@@ -1358,6 +1358,7 @@ class MainWindow(ResponsiveMixin, QtWidgets.QMainWindow):
         # Tiempos de la transcripción mostrada (para enlazar la selección).
         self._current_video_id = None
         self._current_timings = []
+        self._pending_yt_link = None   # enlace del último texto seleccionado
 
         # Estado de la búsqueda dentro del texto (Ctrl+F / botón 🔍).
         self._find_matches = []   # [(inicio, fin), ...] dentro del documento
@@ -1450,7 +1451,7 @@ class MainWindow(ResponsiveMixin, QtWidgets.QMainWindow):
 
         splitter = getattr(self, "_splitter", None)
         if splitter is not None:
-            if compact:
+            if compact or sys.platform == "android" or os.environ.get("ANDROID_ARGUMENT"):
                 splitter.setOrientation(Qt.Vertical)
                 # Reparto proporcional: lista arriba, pestañas abajo.
                 splitter.setStretchFactor(0, 2)
@@ -1901,6 +1902,13 @@ class MainWindow(ResponsiveMixin, QtWidgets.QMainWindow):
         self.btn_theme.clicked.connect(self._cycle_read_theme)
         controles_box.addWidget(self.btn_theme, 0, Qt.AlignBottom)
 
+        self.btn_yt_link = QtWidgets.QPushButton("▶")
+        self.btn_yt_link.setObjectName("fontBtn")
+        self.btn_yt_link.setCursor(Qt.PointingHandCursor)
+        self.btn_yt_link.setToolTip("Abrir el vídeo en el segundo del texto seleccionado")
+        self.btn_yt_link.clicked.connect(self._open_yt_link)
+        controles_box.addWidget(self.btn_yt_link, 0, Qt.AlignBottom)
+
         self.btn_read = QtWidgets.QPushButton("⛶")
         self.btn_read.setObjectName("fontBtn")
         self.btn_read.setCursor(Qt.PointingHandCursor)
@@ -1986,6 +1994,8 @@ class MainWindow(ResponsiveMixin, QtWidgets.QMainWindow):
         # Menú contextual propio: enlazar la selección al segundo del vídeo.
         self.texto.setContextMenuPolicy(Qt.CustomContextMenu)
         self.texto.customContextMenuRequested.connect(self._transcript_menu)
+        # Botón «▶ YouTube»: se activa al seleccionar texto (útil en táctil/Android).
+        self.texto.selectionChanged.connect(self._on_text_selection_changed)
         # Marco centrado: en modo lectura se limita el ancho del visor (columna).
         marco = QtWidgets.QHBoxLayout()
         marco.setContentsMargins(0, 0, 0, 0)
@@ -3054,6 +3064,8 @@ class MainWindow(ResponsiveMixin, QtWidgets.QMainWindow):
         self.texto.setPlainText(content)
         # Al cambiar de transcripción se limpia la búsqueda (resaltados y contador).
         self._clear_find()
+        # Reinicia el botón «▶ YouTube» (la selección previa ya no aplica).
+        self._pending_yt_link = None
 
     # ── Enlace de la selección al segundo del vídeo ──
     def _transcript_menu(self, pos):
@@ -3093,6 +3105,42 @@ class MainWindow(ResponsiveMixin, QtWidgets.QMainWindow):
             return None
         # Un segundo de margen antes del comienzo: así el vídeo arranca clavado.
         return max(0, int(t0 - 1))
+
+    def _on_text_selection_changed(self):
+        """Guarda el enlace del texto seleccionado (para el botón ▶)."""
+        cursor = self.texto.textCursor()
+        if cursor.hasSelection() and self._current_video_id and self._current_timings:
+            start_sec = self._selection_start_sec(cursor)
+            if start_sec is not None:
+                self._pending_yt_link = (
+                    f"https://www.youtube.com/watch?v={self._current_video_id}&t={start_sec}s"
+                )
+
+    def _open_yt_link(self):
+        """Abre el vídeo en el segundo del último texto seleccionado.
+
+        Si no hay enlace (sin selección o sin tiempos), avisa en vez de callar.
+        """
+        if not self._pending_yt_link:
+            QtWidgets.QMessageBox.information(
+                self, "Abrir en YouTube",
+                "Selecciona antes un trozo de texto.\n\n"
+                "Si ya lo tienes seleccionado y aun así no se abre, es que esta "
+                "transcripción no tiene tiempos: vuelve a descargarla.")
+            return
+        url = self._pending_yt_link
+        # Copia al portapapeles como respaldo, por si no hay navegador.
+        QtWidgets.QApplication.clipboard().setText(url)
+        try:
+            ok = QtGui.QDesktopServices.openUrl(QUrl(url))
+        except Exception:  # noqa: BLE001 — en Android puede no haber manejador
+            ok = False
+        if not ok:
+            QtWidgets.QMessageBox.information(
+                self, "Enlace copiado",
+                "No se pudo abrir un navegador en este dispositivo.\n"
+                "El enlace ya está en el portapapeles, pégalo donde quieras:\n\n"
+                + url)
 
     def _time_at(self, offset):
         """Segundo de inicio del subtítulo más próximo que cubre `offset`."""
@@ -3269,11 +3317,20 @@ class MainWindow(ResponsiveMixin, QtWidgets.QMainWindow):
         return re.sub(r'[\\/:*?"<>|]', "_", name).strip() or "transcripcion"
 
     def _exportar_pdf(self, title, content, url, owner=""):
-        filepath, _ = QtWidgets.QFileDialog.getSaveFileName(
-            self, "Guardar PDF como…", f"{self._safe_filename(title)}.pdf", "PDF (*.pdf)"
-        )
-        if not filepath:
-            return
+        if sys.platform == "android" or os.environ.get("ANDROID_ARGUMENT"):
+            # En Android no hay diálogo de guardado fiable: se escribe en
+            # Descargas (o en la carpeta de datos si Descargas no está).
+            from PySide6.QtCore import QStandardPaths
+            base = QStandardPaths.writableLocation(QStandardPaths.DownloadLocation)
+            if not base:
+                base = APP_DIR
+            filepath = os.path.join(base, f"{self._safe_filename(title)}.pdf")
+        else:
+            filepath, _ = QtWidgets.QFileDialog.getSaveFileName(
+                self, "Guardar PDF como…", f"{self._safe_filename(title)}.pdf", "PDF (*.pdf)"
+            )
+            if not filepath:
+                return
 
         _escribir_pdf(filepath, title, content, url, owner)
         self._log(f"📄 PDF exportado: {filepath}", "ok")

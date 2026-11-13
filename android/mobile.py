@@ -99,11 +99,11 @@ def _single_column(win: QtWidgets.QWidget) -> None:
     splitter.setHandleWidth(14)  # fácil de arrastrar con el dedo
     splitter.setChildrenCollapsible(True)
 
-    # Tras mostrarse la ventana ya hay altura real: reparto 45/55.
+    # Tras mostrarse la ventana ya hay altura real: reparto 38/62 (más lector).
     def _balance() -> None:
         height = splitter.height()
         if height > 0:
-            splitter.setSizes([int(height * 0.42), int(height * 0.58)])
+            splitter.setSizes([int(height * 0.38), int(height * 0.62)])
 
     QtCore.QTimer.singleShot(0, _balance)
 
@@ -157,17 +157,8 @@ class _WrapHeightFitter(QtCore.QObject):
 
 
 def _adapt_widgets(win: QtWidgets.QWidget) -> None:
-    # El PDF se genera con reportlab, que no se empaqueta en la APK: mejor no
-    # ofrecer un botón que sólo puede fallar.
-    export = getattr(win, "btn_export", None)
-    if export is not None:
-        export.hide()
-
-    # Cuaderno de preguntas en PDF: necesita reportlab, que no va en la APK.
-    for name in ("btn_qa_save", "chk_qa_open", "btn_qa_open", "lbl_qa_cuaderno"):
-        widget = getattr(win, name, None)
-        if widget is not None:
-            widget.hide()
+    # reportlab ya se empaqueta (parcheado para funcionar sin Pillow), así que
+    # «Exportar a PDF» y el cuaderno están disponibles también en Android.
 
     # El estado del índice puede ser largo; que no empuje el ancho.
     status = getattr(win, "lbl_rag_status", None)
@@ -243,6 +234,19 @@ def apply_mobile_layout(win: QtWidgets.QMainWindow) -> None:
     _single_column(win)
     _enable_tabs(win)
     _adapt_widgets(win)
+
+    # Scroll táctil en el lector y en la lista: en Android, QAbstractScrollArea
+    # (QTextEdit, QListWidget) no se desplaza con el dedo sin QScroller, así que
+    # no se llega al final de textos largos ni al final de la lista.
+    for name in ("texto", "listbox"):
+        widget = getattr(win, name, None)
+        if widget is not None:
+            try:
+                QtWidgets.QScroller.grabGesture(
+                    widget.viewport(),
+                    QtWidgets.QScroller.ScrollerGestureType.TouchGesture)
+            except Exception:  # noqa: BLE001 — si falla, se sigue pudiendo usar
+                pass
 
     log_area = getattr(win, "log_area", None)
     if log_area is not None:
