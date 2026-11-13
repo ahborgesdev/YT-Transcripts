@@ -373,16 +373,39 @@ def linkify_citations(text: str) -> str:
     return re.sub(r"\[(\d+(?:\s*[,;]\s*\d+)*)\]", _repl, text)
 
 
-def read_font_qss(size_pt: int) -> str:
-    """Regla que fija el tamaño de letra del visor de transcripciones.
+# Temas del lector de transcripciones: cambian SOLO el área del texto (fondo,
+# tinta y borde), no toda la app. El resto de la interfaz sigue en oscuro.
+READ_THEMES = (
+    ("dark",  "🌙", "Oscuro", "#1b1b25", "#d6d6e2", "#2a2a38"),
+    ("light", "☀️", "Claro",  "#fbfbfd", "#1c2541", "#d5d6dd"),
+    ("sepia", "📄", "Sepia",  "#f6ecd4", "#2b3a55", "#e0d3b6"),
+)
+
+
+def read_viewer_qss(size_pt: int, theme: str = "dark") -> str:
+    """Regla del visor: tamaño de letra + colores del tema elegido.
 
     No sirve QTextEdit.setFont(): la regla global «* { font-size: 13px }» de la
     hoja de estilo vuelve a imponer su tamaño al pulir el widget. Una regla
     propia por objectName gana por especificidad (id > universal) y, al aplicar-
     la sobre el widget, solo se re-pule el visor (unos 13 ms en vez de ~70 ms de
-    repulir toda la ventana).
+    repulir toda la ventana). Aquí se aprovecha ese mismo mecanismo para el tema.
     """
-    return f"QTextEdit#transcriptView {{ font-size: {int(size_pt)}pt; }}"
+    bg, fg, borde = "#1b1b25", "#d6d6e2", "#2a2a38"
+    for key, _emoji, _name, tbg, tfg, tborde in READ_THEMES:
+        if key == theme:
+            bg, fg, borde = tbg, tfg, tborde
+            break
+    return (
+        f"QTextEdit#transcriptView {{ "
+        f"font-size: {int(size_pt)}pt; "
+        f"background-color: {bg}; "
+        f"color: {fg}; "
+        f"border: 1px solid {borde}; "
+        f"selection-background-color: #6c5ce7; "
+        f"selection-color: #ffffff; "
+        f"}}"
+    )
 
 
 # ─────────────────────────────────────────────
@@ -406,8 +429,8 @@ READ_FONT_MAX = 40
 
 
 def load_ui_config() -> dict:
-    """Preferencias de la interfaz (tamaño de letra del lector, etc.)."""
-    cfg = {"read_font_size": READ_FONT_DEFAULT, "log_visible": False}
+    """Preferencias de la interfaz (tamaño de letra del lector, tema, etc.)."""
+    cfg = {"read_font_size": READ_FONT_DEFAULT, "log_visible": False, "read_theme": "dark"}
     if os.path.exists(UI_CONFIG_PATH):
         try:
             with open(UI_CONFIG_PATH, "r", encoding="utf-8") as fh:
@@ -421,6 +444,8 @@ def load_ui_config() -> dict:
                                     min(READ_FONT_MAX, int(cfg["read_font_size"])))
     except (TypeError, ValueError):
         cfg["read_font_size"] = READ_FONT_DEFAULT
+    if cfg.get("read_theme") not in [k for k, *_ in READ_THEMES]:
+        cfg["read_theme"] = "dark"
     return cfg
 
 
@@ -1869,6 +1894,13 @@ class MainWindow(ResponsiveMixin, QtWidgets.QMainWindow):
         self.btn_font_inc.clicked.connect(lambda: self._nudge_read_font(1))
         controles_box.addWidget(self.btn_font_inc, 0, Qt.AlignBottom)
 
+        self.btn_theme = QtWidgets.QPushButton("🌙")
+        self.btn_theme.setObjectName("fontBtn")
+        self.btn_theme.setCursor(Qt.PointingHandCursor)
+        self.btn_theme.setToolTip("Tema del lector: oscuro / claro / sepia")
+        self.btn_theme.clicked.connect(self._cycle_read_theme)
+        controles_box.addWidget(self.btn_theme, 0, Qt.AlignBottom)
+
         self.btn_read = QtWidgets.QPushButton("⛶")
         self.btn_read.setObjectName("fontBtn")
         self.btn_read.setCursor(Qt.PointingHandCursor)
@@ -1967,6 +1999,7 @@ class MainWindow(ResponsiveMixin, QtWidgets.QMainWindow):
         # mostrado quedarían desincronizados).
         self.texto.viewport().installEventFilter(self)
         self._apply_read_font_size(self._ui_cfg["read_font_size"])
+        self._apply_read_theme()   # deja el botón 🌙/☀️/📄 con el tema guardado
 
         # Atajos de teclado: Ctrl+=/Ctrl++ agrandan, Ctrl+− reduce, Ctrl+0 restablece
         for seq, delta in (("Ctrl+=", 1), ("Ctrl++", 1), ("Ctrl+-", -1)):
@@ -2034,8 +2067,8 @@ class MainWindow(ResponsiveMixin, QtWidgets.QMainWindow):
         size = max(READ_FONT_MIN, min(READ_FONT_MAX, int(size)))
         self._ui_cfg["read_font_size"] = size
 
-        # Vía principal: regla de estilo propia del visor (ver read_font_qss)
-        self.texto.setStyleSheet(read_font_qss(size))
+        # Vía principal: regla de estilo propia del visor (ver read_viewer_qss)
+        self.texto.setStyleSheet(read_viewer_qss(size, self._ui_cfg.get("read_theme", "dark")))
 
         # Refuerzo: fuente del documento (el texto es plano y hereda esta)
         font = QFontDatabase.systemFont(QFontDatabase.GeneralFont)
@@ -2057,6 +2090,25 @@ class MainWindow(ResponsiveMixin, QtWidgets.QMainWindow):
     def _reset_read_font(self):
         self._apply_read_font_size(READ_FONT_DEFAULT)
         save_ui_config(read_font_size=READ_FONT_DEFAULT)
+
+    # ── Tema del lector (oscuro / claro / sepia) ──
+    def _cycle_read_theme(self):
+        keys = [k for k, *_ in READ_THEMES]
+        actual = self._ui_cfg.get("read_theme", "dark")
+        idx = keys.index(actual) if actual in keys else 0
+        self._ui_cfg["read_theme"] = keys[(idx + 1) % len(keys)]
+        save_ui_config(read_theme=self._ui_cfg["read_theme"])
+        self._apply_read_theme()
+
+    def _apply_read_theme(self):
+        tema = self._ui_cfg.get("read_theme", "dark")
+        for key, emoji, name, *_ in READ_THEMES:
+            if key == tema:
+                self.btn_theme.setText(emoji)
+                self.btn_theme.setToolTip(f"Tema del lector: {name} (clic para cambiar)")
+                break
+        # Re-pinta el visor con el tema elegido y el tamaño de letra actual.
+        self.texto.setStyleSheet(read_viewer_qss(self._ui_cfg["read_font_size"], tema))
 
     def eventFilter(self, obj, event):
         # Sobre el lector: Ctrl + rueda y pellizco del trackpad = zoom de letra

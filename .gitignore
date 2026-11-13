@@ -33,6 +33,7 @@ ui_config.json
 # Compilación Android (ver android/README.md)
 .venv-android/
 .android-build/
+*.apk
 
 # Copias de seguridad locales (no subir)
 backups/
