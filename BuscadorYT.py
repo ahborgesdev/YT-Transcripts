@@ -587,13 +587,16 @@ def init_db():
             url         TEXT,
             language    TEXT,
             content     TEXT,
+            timings     TEXT,
             created_at  TEXT
         )
     """)
-    # Migración: añade la columna 'owner' a bases de datos ya existentes.
+    # Migraciones: añade columnas a bases de datos ya existentes.
     cols = [r[1] for r in c.execute("PRAGMA table_info(transcripts)")]
     if "owner" not in cols:
         c.execute("ALTER TABLE transcripts ADD COLUMN owner TEXT")
+    if "timings" not in cols:
+        c.execute("ALTER TABLE transcripts ADD COLUMN timings TEXT")
     # Preguntas y respuestas guardadas para el «cuaderno» en PDF de cada base.
     c.execute("""
         CREATE TABLE IF NOT EXISTS qa_log (
@@ -609,13 +612,21 @@ def init_db():
     conn.commit()
     conn.close()
 
-def save_transcript(video_id, title, owner, url, language, content):
+def save_transcript(video_id, title, owner, url, language, content, timings=None):
+    """Guarda la transcripción y, si los hay, los tiempos por subtítulo.
+
+    timings es una lista de [inicio_char, fin_char, t0, t1] en el texto final;
+    se guarda como JSON para poder enlazar una selección al segundo del vídeo.
+    """
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
     c.execute("""
-        INSERT OR REPLACE INTO transcripts (video_id, title, owner, url, language, content, created_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?)
-    """, (video_id, title, owner, url, language, content, datetime.now().isoformat(timespec="seconds")))
+        INSERT OR REPLACE INTO transcripts
+            (video_id, title, owner, url, language, content, timings, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    """, (video_id, title, owner, url, language, content,
+          json.dumps(timings, ensure_ascii=False) if timings else None,
+          datetime.now().isoformat(timespec="seconds")))
     conn.commit()
     conn.close()
 
@@ -643,6 +654,25 @@ def get_transcript_content(video_id):
     row = c.fetchone()
     conn.close()
     return row
+
+def get_transcript_timings(video_id):
+    """Devuelve los spans de tiempo ([s,e,t0,t1]...) o None si no los hay.
+
+    Las transcripciones guardadas antes de esta función no tienen tiempos:
+    devuelven None hasta que se vuelven a descargar.
+    """
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("SELECT timings FROM transcripts WHERE video_id = ?", (video_id,))
+    row = c.fetchone()
+    conn.close()
+    if not row or not row[0]:
+        return None
+    try:
+        data = json.loads(row[0])
+        return data if isinstance(data, list) else None
+    except (ValueError, TypeError):
+        return None
 
 def delete_transcript(video_id):
     conn = sqlite3.connect(DB_PATH)
@@ -742,7 +772,7 @@ def fetch_video_meta(video_id: str) -> tuple[str, str]:
     except Exception:
         return (video_id, "")
 
-def fetch_transcript(video_id: str, lang: str = "es") -> tuple[str, str]:
+def fetch_transcript(video_id: str, lang: str = "es") -> tuple[str, str, list]:
     """
     Versión que usa el método fetch() de INSTANCIA (el único que funciona)
     """
@@ -757,14 +787,14 @@ def fetch_transcript(video_id: str, lang: str = "es") -> tuple[str, str]:
         api = YouTubeTranscriptApi()
         transcript = api.fetch(video_id, languages=langs, preserve_formatting=True)
 
-        # Limpiar a texto plano legible (sin HTML, sin cortes, sin timestamps)
-        text = clean_transcript_text(transcript)
+        # Limpiar a texto plano legible conservando los tiempos de cada subtítulo.
+        text, spans = clean_transcript_with_timing(transcript)
 
         # Determinar idioma usado (esto es lo más complicado)
         # Por defecto devolvemos el solicitado
         lang_used = lang if lang != "auto" else "es"
 
-        return text, str(lang_used)
+        return text, str(lang_used), spans
 
     except Exception as e:
         raise RuntimeError(f"Error al obtener transcripción: {e}")
@@ -786,6 +816,64 @@ _SENTENCE_END = re.compile(r'([.!?…]["»”]?)\s+(?=[A-ZÁÉÍÓÚÑ¿¡"“«
 _SOUND_TAG = re.compile(r"\[[^\]]{1,40}\]")
 
 
+def _piece_time(piece, attr: str, default: float = 0.0) -> float:
+    """Segundos de un fragmento (start/duration), tanto si es objeto como dict."""
+    try:
+        if hasattr(piece, attr):
+            return float(getattr(piece, attr) or 0.0)
+        if isinstance(piece, dict):
+            return float(piece.get(attr) or 0.0)
+    except (TypeError, ValueError):
+        pass
+    return default
+
+
+def clean_transcript_with_timing(pieces):
+    """Limpia los subtítulos y devuelve (texto, spans).
+
+    spans es una lista ordenada de [inicio_char, fin_char, t0, t1] referida al
+    texto final: t0/t1 son los segundos de inicio y fin de cada subtítulo. Con
+    esto se puede enlazar una selección de texto con el momento exacto del vídeo.
+    """
+    # 1) Limpiar cada subtítulo (fuera [música], espacios) y conservar los que
+    #    tienen texto, con su instante de inicio y de fin.
+    items = []  # (texto, t0, t1)
+    for p in pieces:
+        t = _piece_text(p).strip()
+        t = _SOUND_TAG.sub(" ", t)
+        t = re.sub(r"\s+", " ", t).strip()
+        if not t:
+            continue
+        t0 = _piece_time(p, "start")
+        t1 = t0 + _piece_time(p, "duration")
+        items.append((t, t0, t1))
+    if not items:
+        return "", []
+
+    # 2) "full": todas las piezas unidas con un espacio (mismo resultado que el
+    #    pipeline anterior). Anotamos dónde empieza y acaba cada pieza.
+    full = " ".join(t for t, _, _ in items)
+    piece_offsets = []  # (inicio_full, fin_full, t0, t1)
+    cursor = 0
+    for t, t0, t1 in items:
+        piece_offsets.append((cursor, cursor + len(t), t0, t1))
+        cursor += len(t) + 1  # +1 por el espacio separador
+
+    # 3) Dividir en párrafos como antes; _split_paragraphs nos da además en qué
+    #    posición de "full" se separa cada párrafo (ahí el espacio pasa a "\n\n").
+    paragraphs, breaks = _split_paragraphs(full)
+    content = "\n\n".join(paragraphs)
+
+    # 4) Convertir offsets de "full" a offsets del texto final: cada salto de
+    #    párrafo anterior añade un carácter (un espacio pasa a dos "\n").
+    def _to_content(off):
+        return off + sum(1 for b in breaks if b <= off)
+
+    spans = [[_to_content(s), _to_content(e), round(t0, 2), round(t1, 2)]
+             for s, e, t0, t1 in piece_offsets]
+    return content, spans
+
+
 def clean_transcript_text(pieces) -> str:
     """
     Convierte los fragmentos de subtítulos en texto plano legible:
@@ -794,16 +882,8 @@ def clean_transcript_text(pieces) -> str:
       · elimina marcadores de sonido tipo [música],
       · divide en párrafos por límites de frase.
     """
-    texts = [t.strip() for t in (_piece_text(p) for p in pieces) if t and t.strip()]
-    if not texts:
-        return ""
-
-    full = " ".join(texts)
-    full = re.sub(r"\s+", " ", full).strip()
-    full = _SOUND_TAG.sub(" ", full)
-    full = re.sub(r"\s+", " ", full).strip()
-
-    return "\n\n".join(_split_paragraphs(full))
+    text, _ = clean_transcript_with_timing(pieces)
+    return text
 
 
 def _split_sentences(text: str) -> list:
@@ -812,24 +892,39 @@ def _split_sentences(text: str) -> list:
     return [p.strip() for p in marked.split("\n") if p.strip()]
 
 
-def _split_paragraphs(text: str, sentences_per_para: int = 4, max_chars: int = 700) -> list:
-    """Agrupa las frases en párrafos de tamaño legible."""
+def _split_paragraphs(text: str, sentences_per_para: int = 4, max_chars: int = 700):
+    """Agrupa las frases en párrafos de tamaño legible.
+
+    Devuelve (párrafos, cortes): `cortes` son los offsets de `text` donde acaba
+    un párrafo y empieza el siguiente (en esa posición el espacio separador pasa
+    a "\n\n" al reconstruir el texto final). Útil para mapear offsets.
+    """
+    sentences = _split_sentences(text)
+    starts = []  # posición de cada frase dentro de `text`
+    pos = 0
+    for s in sentences:
+        idx = text.find(s, pos)
+        starts.append(idx)
+        pos = idx + len(s)
+
     paragraphs = []
+    breaks = []
     buffer = []
     buffer_len = 0
-
-    for sentence in _split_sentences(text):
+    for i, sentence in enumerate(sentences):
         buffer.append(sentence)
         buffer_len += len(sentence)
         if len(buffer) >= sentences_per_para or buffer_len >= max_chars:
             paragraphs.append(" ".join(buffer))
             buffer = []
             buffer_len = 0
+            if i < len(sentences) - 1:
+                breaks.append(starts[i] + len(sentence))
 
     if buffer:
         paragraphs.append(" ".join(buffer))
 
-    return paragraphs
+    return paragraphs, breaks
 
 
 # ─────────────────────────────────────────────
@@ -1055,10 +1150,10 @@ class DownloadWorker(QtCore.QObject):
 
     def run(self):
         try:
-            text, lang_used = fetch_transcript(self.video_id, self.lang)
+            text, lang_used, spans = fetch_transcript(self.video_id, self.lang)
             url = f"https://youtu.be/{self.video_id}"
             title, owner = fetch_video_meta(self.video_id)
-            save_transcript(self.video_id, title, owner, url, lang_used, text)
+            save_transcript(self.video_id, title, owner, url, lang_used, text, spans)
             self.ok.emit(self.video_id, title, owner, lang_used, text)
         except Exception as e:
             # Mensaje amigable si YouTube bloquea la IP (error 429 / IpBlocked)
@@ -1234,6 +1329,14 @@ class MainWindow(ResponsiveMixin, QtWidgets.QMainWindow):
         # Preferencias de UI (tamaño de letra del lector)
         self._ui_cfg = load_ui_config()
         self._zoom_accum = 0.0   # acumulador del zoom por pellizco (trackpad)
+
+        # Tiempos de la transcripción mostrada (para enlazar la selección).
+        self._current_video_id = None
+        self._current_timings = []
+
+        # Estado de la búsqueda dentro del texto (Ctrl+F / botón 🔍).
+        self._find_matches = []   # [(inicio, fin), ...] dentro del documento
+        self._find_index = -1
 
         self.setWindowTitle(f"YT Transcripts · {db_stem()}")
         self.resize(1200, 800)
@@ -1785,10 +1888,61 @@ class MainWindow(ResponsiveMixin, QtWidgets.QMainWindow):
             "Columna de lectura: limita el ancho de las líneas (solo en modo lectura)")
         self.btn_column.toggled.connect(lambda _v: self._apply_reading_column())
         controles_box.addWidget(self.btn_column, 0, Qt.AlignBottom)
+
+        self.btn_find = QtWidgets.QPushButton("🔍")
+        self.btn_find.setObjectName("fontBtn")
+        self.btn_find.setCursor(Qt.PointingHandCursor)
+        self.btn_find.setToolTip("Buscar en el texto (Ctrl+F)")
+        self.btn_find.clicked.connect(self._toggle_find)
+        controles_box.addWidget(self.btn_find, 0, Qt.AlignBottom)
+
         controles_box.addStretch(1)
         self._info_row.addWidget(controles, 0, Qt.AlignBottom)
 
         layout.addLayout(self._info_row)
+
+        # ── Buscar en el texto (Ctrl+F) ──
+        self.search_row = QtWidgets.QWidget()
+        self.search_row.setVisible(False)
+        srow = QtWidgets.QHBoxLayout(self.search_row)
+        srow.setContentsMargins(0, 0, 0, 0)
+        srow.setSpacing(6)
+
+        self.search_input = QtWidgets.QLineEdit()
+        self.search_input.setPlaceholderText("Buscar en el texto…")
+        self.search_input.setClearButtonEnabled(True)
+        self.search_input.textChanged.connect(self._do_find)
+        self.search_input.returnPressed.connect(self._find_next)
+        srow.addWidget(self.search_input, 1)
+
+        self.btn_find_prev = QtWidgets.QPushButton("↑")
+        self.btn_find_prev.setObjectName("fontBtn")
+        self.btn_find_prev.setCursor(Qt.PointingHandCursor)
+        self.btn_find_prev.setToolTip("Anterior")
+        self.btn_find_prev.clicked.connect(self._find_prev)
+        srow.addWidget(self.btn_find_prev)
+
+        self.btn_find_next = QtWidgets.QPushButton("↓")
+        self.btn_find_next.setObjectName("fontBtn")
+        self.btn_find_next.setCursor(Qt.PointingHandCursor)
+        self.btn_find_next.setToolTip("Siguiente (Enter)")
+        self.btn_find_next.clicked.connect(self._find_next)
+        srow.addWidget(self.btn_find_next)
+
+        self.lbl_find_count = QtWidgets.QLabel("")
+        self.lbl_find_count.setObjectName("appSubtitle")
+        self.lbl_find_count.setMinimumWidth(44)
+        self.lbl_find_count.setAlignment(Qt.AlignCenter)
+        srow.addWidget(self.lbl_find_count)
+
+        self.btn_find_close = QtWidgets.QPushButton("✕")
+        self.btn_find_close.setObjectName("fontBtn")
+        self.btn_find_close.setCursor(Qt.PointingHandCursor)
+        self.btn_find_close.setToolTip("Cerrar búsqueda")
+        self.btn_find_close.clicked.connect(self._hide_find)
+        srow.addWidget(self.btn_find_close)
+
+        layout.addWidget(self.search_row)
 
         # Visor de transcripción
         self.texto = QtWidgets.QTextEdit()
@@ -1797,6 +1951,9 @@ class MainWindow(ResponsiveMixin, QtWidgets.QMainWindow):
         # El texto ocupa todo el ancho disponible y envuelve por la ventana.
         self.texto.setLineWrapMode(QtWidgets.QTextEdit.LineWrapMode.WidgetWidth)
         self.texto.setPlaceholderText("Aquí se mostrará el texto de la transcripción…")
+        # Menú contextual propio: enlazar la selección al segundo del vídeo.
+        self.texto.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.texto.customContextMenuRequested.connect(self._transcript_menu)
         # Marco centrado: en modo lectura se limita el ancho del visor (columna).
         marco = QtWidgets.QHBoxLayout()
         marco.setContentsMargins(0, 0, 0, 0)
@@ -1819,6 +1976,9 @@ class MainWindow(ResponsiveMixin, QtWidgets.QMainWindow):
         sc = QShortcut(QKeySequence("Ctrl+0"), self)
         sc.setContext(Qt.WindowShortcut)
         sc.activated.connect(self._reset_read_font)
+        sc = QShortcut(QKeySequence("Ctrl+F"), self)
+        sc.setContext(Qt.WindowShortcut)
+        sc.activated.connect(self._toggle_find)
 
         return panel
 
@@ -2817,6 +2977,11 @@ class MainWindow(ResponsiveMixin, QtWidgets.QMainWindow):
         title, url, lang, content, owner = row
         self.lbl_title.setText(title or video_id)
 
+        # Tiempos por subtítulo para enlazar una selección al segundo exacto.
+        # Las transcripciones guardadas antes de esta función no los tienen.
+        self._current_video_id = video_id
+        self._current_timings = get_transcript_timings(video_id) or []
+
         # Enlace al vídeo: se construye siempre (aunque falte la URL guardada) y
         # el QLabel lo abre en el navegador al pulsarlo.
         href = video_url(video_id, url)
@@ -2828,10 +2993,146 @@ class MainWindow(ResponsiveMixin, QtWidgets.QMainWindow):
         if owner:
             partes.append(html.escape(owner))
         partes.append(f"{len(content)} caracteres")
+        # Indicador visible de si esta transcripción permite enlazar a un segundo.
+        partes.append("⏱ con tiempos" if self._current_timings
+                      else "⏱ sin tiempos · re-descárgala para enlazar")
         self.lbl_meta.setText("  ·  ".join(partes))
         self.lbl_meta.setVisible(True)
 
         self.texto.setPlainText(content)
+        # Al cambiar de transcripción se limpia la búsqueda (resaltados y contador).
+        self._clear_find()
+
+    # ── Enlace de la selección al segundo del vídeo ──
+    def _transcript_menu(self, pos):
+        """Menú contextual del lector: dos opciones, sin rodeos.
+
+        Con texto seleccionado (y tiempos disponibles): «Abrir en YouTube» salta
+        directo al segundo y «Copiar selección» copia el texto. El resto se omite.
+        """
+        cursor = self.texto.textCursor()
+        hay_seleccion = cursor.hasSelection()
+        menu = QtWidgets.QMenu(self.texto)
+
+        if hay_seleccion:
+            if self._current_video_id and self._current_timings:
+                start_sec = self._selection_start_sec(cursor)
+                if start_sec is not None:
+                    enlace = (f"https://www.youtube.com/watch?v="
+                              f"{self._current_video_id}&t={start_sec}s")
+                    menu.addAction("Abrir en YouTube",
+                                   lambda: QtGui.QDesktopServices.openUrl(QUrl(enlace)))
+            menu.addAction("Copiar selección", self.texto.copy)
+        else:
+            menu.addAction("Seleccionar todo", self.texto.selectAll)
+
+        menu.exec(self.texto.viewport().mapToGlobal(pos))
+
+    def _selection_start_sec(self, cursor):
+        """Segundo de inicio de la selección (1 s de margen antes), o None."""
+        if not self._current_timings:
+            return None
+        a = cursor.selectionStart()
+        b = cursor.selectionEnd()
+        if b < a:
+            a, b = b, a
+        t0 = self._time_at(a)
+        if t0 is None:
+            return None
+        # Un segundo de margen antes del comienzo: así el vídeo arranca clavado.
+        return max(0, int(t0 - 1))
+
+    def _time_at(self, offset):
+        """Segundo de inicio del subtítulo más próximo que cubre `offset`."""
+        chosen = None
+        for span in self._current_timings:
+            if span[0] <= offset:
+                chosen = span
+            else:
+                break
+        if chosen is None:
+            return None
+        try:
+            return float(chosen[2])  # spans = [s, e, t0, t1]
+        except (TypeError, ValueError, IndexError):
+            return None
+
+    # ── Buscar dentro del texto ──
+    def _toggle_find(self, *_args):
+        """Muestra u oculta la barra de búsqueda (botón 🔍 o Ctrl+F)."""
+        if not self.search_row.isHidden():
+            self._hide_find()
+        else:
+            self.search_row.setVisible(True)
+            self.search_input.setFocus()
+            self.search_input.selectAll()
+
+    def _hide_find(self):
+        self.search_row.setVisible(False)
+        self._clear_find()
+
+    def _clear_find(self):
+        """Quita los resaltados y reinicia el estado de búsqueda."""
+        self._find_matches = []
+        self._find_index = -1
+        self.lbl_find_count.setText("")
+        if hasattr(self, "texto"):
+            self.texto.setExtraSelections([])
+
+    def _do_find(self, text):
+        """Busca `text` (sin distinguir mayúsculas) y resalta todas las veces."""
+        text = text.strip()
+        self._find_matches = []
+        self._find_index = -1
+        if not text:
+            self.texto.setExtraSelections([])
+            self.lbl_find_count.setText("")
+            return
+
+        doc = self.texto.document()
+        fmt = QtGui.QTextCharFormat()
+        fmt.setBackground(QtGui.QColor("#8f7bff"))   # violeta de acento
+        fmt.setForeground(QtGui.QColor("#15151d"))   # texto oscuro sobre violeta
+
+        extras = []
+        cur = doc.find(text, 0)
+        while not cur.isNull():
+            self._find_matches.append((cur.selectionStart(), cur.selectionEnd()))
+            sel = QtWidgets.QTextEdit.ExtraSelection()
+            sel.format = fmt
+            sel.cursor = cur
+            extras.append(sel)
+            cur = doc.find(text, cur.selectionEnd())
+        self.texto.setExtraSelections(extras)
+        self._find_index = 0 if self._find_matches else -1
+        self._goto_find_match()
+
+    def _find_next(self):
+        if not self._find_matches:
+            self._do_find(self.search_input.text())
+            return
+        self._find_index = (self._find_index + 1) % len(self._find_matches)
+        self._goto_find_match()
+
+    def _find_prev(self):
+        if not self._find_matches:
+            self._do_find(self.search_input.text())
+            return
+        self._find_index = (self._find_index - 1) % len(self._find_matches)
+        self._goto_find_match()
+
+    def _goto_find_match(self):
+        """Selecciona la coincidencia actual y hace scroll hasta ella."""
+        if not self._find_matches or self._find_index < 0:
+            self.lbl_find_count.setText("0/0")
+            return
+        start, end = self._find_matches[self._find_index]
+        cursor = QTextCursor(self.texto.document())
+        cursor.setPosition(start)
+        cursor.setPosition(end, QTextCursor.KeepAnchor)
+        self.texto.setTextCursor(cursor)
+        self.texto.ensureCursorVisible()
+        self.lbl_find_count.setText(f"{self._find_index + 1}/{len(self._find_matches)}")
 
     def _delete_selected(self):
         video_id = self._selected_video_id()
