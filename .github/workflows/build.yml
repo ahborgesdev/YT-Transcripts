@@ -1,0 +1,67 @@
+name: Build executables
+
+on:
+  workflow_dispatch:            # manual desde la pestaña "Actions"
+  push:
+    tags:
+      - "v*"                    # automático al crear un tag de versión
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: ${{ matrix.name }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            name: windows
+            artifact: BuscadorYT-windows
+          # El .app de macOS se compila en local (los runners de macOS gastan
+          # ×10 de cuota en repos privados). Comando:
+          #   PYINSTALLER_CONFIG_DIR="$PWD/.pyinstaller-cache" \
+          #     .venv/bin/pyinstaller --clean --noconfirm BuscadorYT.spec
+          # Para Linux, descomenta (gasta ×1):
+          # - os: ubuntu-latest
+          #   name: linux
+          #   artifact: BuscadorYT-linux
+
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configurar Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      # PySide6 (Qt) trae sus propias librerías; no requiere paquetes del
+      # sistema para compilar el ejecutable.
+
+      - name: Instalar dependencias
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt pyinstaller
+
+      - name: Compilar con PyInstaller
+        run: pyinstaller --clean --noconfirm windows/BuscadorYT.spec
+
+      - name: Comprobar el ejecutable
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          Get-ChildItem dist
+          $exe = Get-Item dist/BuscadorYT.exe
+          Write-Host ("Tamaño: {0:N1} MB" -f ($exe.Length / 1MB))
+
+      - name: Subir artefacto
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: dist/*
+          if-no-files-found: error
