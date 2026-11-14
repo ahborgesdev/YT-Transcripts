@@ -9,6 +9,11 @@
 
 from PyInstaller.utils.hooks import collect_all
 
+# PyInstaller resuelve los scripts relativos a la carpeta del spec (windows/),
+# así que apuntamos explícitamente a la raíz del proyecto.
+import os
+ROOT = os.path.abspath(os.path.join(SPECPATH, ".."))
+
 datas = []
 binaries = []
 hiddenimports = []
@@ -43,8 +48,8 @@ excludes = [
 ]
 
 a = Analysis(
-    ["BuscadorYT.py"],
-    pathex=[],
+    [os.path.join(ROOT, "BuscadorYT.py")],
+    pathex=[ROOT],
     binaries=binaries,
     datas=datas,
     hiddenimports=hiddenimports,
@@ -72,5 +77,5 @@ exe = EXE(
     runtime_tmpdir=None,
     console=False,              # sin terminal (GUI)
     disable_windowed_traceback=False,
-    icon="windows/BuscadorYT.ico",      # icono de Windows
+    icon=os.path.join(SPECPATH, "BuscadorYT.ico"),   # icono de Windows
 )
