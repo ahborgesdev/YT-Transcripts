@@ -25,7 +25,7 @@ tener una base por tema (`costura.db`, `cocina.db`…) con su propio índice.
 
 ## Requisitos
 
-- macOS (Apple Silicon) para la app empaquetada de este repositorio.
+- **Windows 10+**, **Linux** o **macOS** para ejecutar la app (empaquetada o desde el código).
 - Python 3.12+ si trabajas desde el código.
 - Opcional: [Ollama](https://ollama.com) para redactar respuestas en local.
 - Opcional: clave de API de [DeepSeek](https://platform.deepseek.com) para la nube.
@@ -121,8 +121,11 @@ PYINSTALLER_CONFIG_DIR="$PWD/.pyinstaller-cache" \
 ```
 
 Windows 10+: PyInstaller no cross-compila, así que se compila en GitHub Actions
-(`windows-latest`, ver `.github/workflows/build.yml`) o en una máquina Windows.
-El ejecutable queda en `dist/BuscadorYT.exe`.
+(`windows-latest`, ver `.github/workflows/build.yml` y `windows/BuscadorYT.spec`)
+o en una máquina Windows. El ejecutable queda en `dist/BuscadorYT.exe`.
+
+Linux/Ubuntu: `./setup.sh` crea el entorno y `./run.sh` arranca la app (ver también
+la sección de abajo sobre cada carpeta por sistema operativo).
 
 ## Responsividad (mobile-first)
 
@@ -177,7 +180,10 @@ de un vistazo (con el breakpoint activo marcado en cada una).
 | `responsive.py` | breakpoints, `FieldRow` y `FlowLayout` (mobile-first) |
 | `preview_responsive.py` | capturas a tamaños de móvil, tableta y PC + galería HTML |
 | `paths.py` | carpeta de datos del usuario (Application Support / APPDATA / XDG) y migración |
-| `BuscadorYT.spec` | receta de empaquetado con PyInstaller |
+| `BuscadorYT.spec` | receta de empaquetado con PyInstaller (macOS) |
+| `windows/` | spec + icono + README para compilar el `.exe` de Windows |
+| `android/` | capa de arranque y empaquetado de la APK |
+| `setup.sh` / `run.sh` | instalación y arranque en Linux/Ubuntu |
 | `make_guia.py` | genera la guía de uso (DOCX → PDF) |
 | `RAG.md` | documentación técnica del índice y de los proveedores de IA |
 | `docs/` | guía de uso en PDF |
